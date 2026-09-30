@@ -26,6 +26,7 @@ import { buildStoreExport } from "../src/services/export.service.js";
 import { broadcastToUsers } from "../src/services/broadcast.service.js";
 import { AlreadyRedeemedError, BonusUnavailableError, CodeUnavailableError, InsufficientCreditsError, OutOfStockError, PriceChangedError, ValidationError } from "../src/utils/errors.js";
 import { loadConfig } from "../src/config/env.js";
+import { createDatabase } from "../src/db/client.js";
 import { purchaseDeliveryMessage, welcomeMessage } from "../src/messages/iris.js";
 
 const OWNER_ID = 7_728_424_218n;
@@ -91,6 +92,36 @@ describe("runtime configuration", () => {
     expect(() => loadConfig({ ...base, DATABASE_URL: "https://localhost/iris" })).toThrow("valid PostgreSQL URL");
     expect(() => loadConfig({ ...base, DATABASE_URL: "postgresql:relative-path" })).toThrow("valid PostgreSQL URL");
     expect(() => loadConfig({ ...base, DATABASE_URL: "not-a-url" })).toThrow("valid PostgreSQL URL");
+  });
+
+  it("handles blank optional env vars and allows embedded PGlite when DATABASE_URL is omitted", () => {
+    const cfg = loadConfig({
+      BOT_TOKEN: "TEST_TOKEN_NOT_A_REAL_CREDENTIAL",
+      DATABASE_URL: "",
+      NODE_ENV: "",
+      LOG_LEVEL: "",
+      BONUS_CREDITS: "",
+      BONUS_PERIOD_HOURS: "",
+      DATABASE_POOL_SIZE: "",
+    });
+    expect(cfg.databaseUrl).toBe("");
+    expect(cfg.bonusCredits).toBe(25);
+    expect(cfg.bonusPeriodHours).toBe(24);
+    expect(cfg.databasePoolSize).toBe(10);
+  });
+
+  it("initializes an embedded PGlite database and schema automatically when DATABASE_URL is empty", async () => {
+    const logger = {
+      trace: vi.fn(), debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn(),
+    } as unknown as AppLogger;
+    const db = createDatabase("", 5, logger);
+    try {
+      await db.init?.();
+      const count = await db.prisma.user.count();
+      expect(count).toBeGreaterThanOrEqual(0);
+    } finally {
+      await db.close();
+    }
   });
 });
 

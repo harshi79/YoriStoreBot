@@ -12,7 +12,7 @@
     "forceConsistentCasingInFileNames": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "declaration": true,
+    "declaration": false,
     "sourceMap": true,
     "resolveJsonModule": true,
     "types": ["node"]

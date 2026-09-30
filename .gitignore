@@ -141,3 +141,12 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Prisma Client generated from the committed schema
+src/generated/prisma/
+
+# Local database and test artifacts
+*.sqlite
+*.db
+.pglite/
+.tmp/

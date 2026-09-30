@@ -25,6 +25,13 @@ enum CreditTransactionType {
   ADMIN_ADJUSTMENT
 }
 
+enum WarrantyClaimStatus {
+  PENDING
+  REPLACED
+  REFUNDED
+  REJECTED
+}
+
 model User {
   id                 String    @id @default(cuid())
   telegramId         BigInt    @unique @map("telegram_id")
@@ -39,10 +46,12 @@ model User {
   updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
   isBlocked          Boolean   @default(false) @map("is_blocked")
 
-  purchases         Purchase[]
-  inventoryItems    InventoryItem[]  @relation("InventoryPurchaser")
-  codeRedemptions   CodeRedemption[]
+  purchases          Purchase[]
+  inventoryItems     InventoryItem[]     @relation("InventoryPurchaser")
+  codeRedemptions    CodeRedemption[]
   creditTransactions CreditTransaction[]
+  stockSubscriptions StockSubscription[]
+  warrantyClaims     WarrantyClaim[]
 
   @@index([lastActiveAt])
   @@index([createdAt])
@@ -67,20 +76,28 @@ model Category {
 }
 
 model Product {
-  id          String    @id @default(cuid())
-  categoryId  String    @map("category_id")
-  name        String    @db.VarChar(120)
-  description String    @default("") @db.VarChar(2000)
-  price       Int       @db.Integer
-  emoji       String    @default("✦") @db.VarChar(16)
-  enabled     Boolean   @default(true)
-  deletedAt   DateTime? @map("deleted_at") @db.Timestamptz(6)
-  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                   String    @id @default(cuid())
+  categoryId           String    @map("category_id")
+  name                 String    @db.VarChar(120)
+  description          String    @default("") @db.VarChar(2000)
+  planDetails          String    @default("") @map("plan_details") @db.VarChar(500)
+  deliveryInstructions String    @default("") @map("delivery_instructions") @db.VarChar(2000)
+  warrantyHours        Int       @default(24) @map("warranty_hours") @db.Integer
+  mediaFileId          String?   @map("media_file_id") @db.VarChar(512)
+  featured             Boolean   @default(false)
+  isUnlimited          Boolean   @default(false) @map("is_unlimited")
+  price                Int       @db.Integer
+  emoji                String    @default("✦") @db.VarChar(16)
+  enabled              Boolean   @default(true)
+  deletedAt            DateTime? @map("deleted_at") @db.Timestamptz(6)
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  category  Category        @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  inventory InventoryItem[]
-  purchases Purchase[]
+  category           Category            @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  inventory          InventoryItem[]
+  purchases          Purchase[]
+  stockSubscriptions StockSubscription[]
+  warrantyClaims     WarrantyClaim[]
 
   @@unique([categoryId, name])
   @@index([categoryId, enabled, deletedAt])
@@ -97,8 +114,8 @@ model InventoryItem {
   purchasedAt DateTime?       @map("purchased_at") @db.Timestamptz(6)
   purchaserId String?         @map("purchaser_id")
 
-  product   Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
-  purchaser User?    @relation("InventoryPurchaser", fields: [purchaserId], references: [id], onDelete: SetNull)
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Restrict)
+  purchaser User?     @relation("InventoryPurchaser", fields: [purchaserId], references: [id], onDelete: SetNull)
   purchase  Purchase?
 
   @@unique([productId, payloadHash])
@@ -116,13 +133,49 @@ model Purchase {
   amountPaid      Int      @map("amount_paid")
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  buyer         User          @relation(fields: [buyerId], references: [id], onDelete: Restrict)
-  product       Product       @relation(fields: [productId], references: [id], onDelete: Restrict)
-  inventoryItem InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+  buyer         User           @relation(fields: [buyerId], references: [id], onDelete: Restrict)
+  product       Product        @relation(fields: [productId], references: [id], onDelete: Restrict)
+  inventoryItem InventoryItem  @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+  warrantyClaim WarrantyClaim?
 
   @@index([buyerId, createdAt])
   @@index([productId, createdAt])
   @@map("purchases")
+}
+
+model StockSubscription {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  productId String   @map("product_id")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@index([productId, createdAt])
+  @@map("stock_subscriptions")
+}
+
+model WarrantyClaim {
+  id                String              @id @default(cuid())
+  purchaseId        String              @unique @map("purchase_id")
+  buyerId           String              @map("buyer_id")
+  productId         String              @map("product_id")
+  reason            String              @db.VarChar(500)
+  status            WarrantyClaimStatus @default(PENDING)
+  resolutionNote    String?             @map("resolution_note") @db.VarChar(500)
+  replacementItemId String?             @map("replacement_item_id")
+  createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  resolvedAt        DateTime?           @map("resolved_at") @db.Timestamptz(6)
+
+  purchase Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  buyer    User     @relation(fields: [buyerId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([buyerId, createdAt])
+  @@map("warranty_claims")
 }
 
 model RedeemCode {
@@ -157,15 +210,15 @@ model CodeRedemption {
 }
 
 model CreditTransaction {
-  id             String                 @id @default(cuid())
-  userId         String                 @map("user_id")
-  amount         Int
-  type           CreditTransactionType
-  description    String                 @db.VarChar(500)
-  relatedEntityId String?                @map("related_entity_id") @db.VarChar(128)
-  batchId        String?                @map("batch_id") @db.VarChar(64)
-  balanceAfter   Int                    @map("balance_after")
-  createdAt      DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  id              String                @id @default(cuid())
+  userId          String                @map("user_id")
+  amount          Int
+  type            CreditTransactionType
+  description     String                @db.VarChar(500)
+  relatedEntityId String?               @map("related_entity_id") @db.VarChar(128)
+  batchId         String?               @map("batch_id") @db.VarChar(64)
+  balanceAfter    Int                   @map("balance_after")
+  createdAt       DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
 
   user User @relation(fields: [userId], references: [id], onDelete: Restrict)
 
@@ -182,7 +235,7 @@ model ResetChallenge {
   stage           Int       @default(1)
   createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   expiresAt       DateTime  @map("expires_at") @db.Timestamptz(6)
-  usedAt           DateTime? @map("used_at") @db.Timestamptz(6)
+  usedAt          DateTime? @map("used_at") @db.Timestamptz(6)
 
   @@index([expiresAt, usedAt])
   @@map("reset_challenges")
@@ -191,9 +244,9 @@ model ResetChallenge {
 model AdminAudit {
   id              String   @id @default(cuid())
   ownerTelegramId BigInt   @map("owner_telegram_id")
-  action           String   @db.VarChar(80)
-  details          Json?
-  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  action          String   @db.VarChar(80)
+  details         Json?
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@index([createdAt])
   @@map("admin_audit")

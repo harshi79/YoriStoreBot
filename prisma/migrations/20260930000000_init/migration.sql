@@ -1,5 +1,6 @@
 CREATE TYPE "InventoryStatus" AS ENUM ('AVAILABLE', 'SOLD', 'REMOVED');
 CREATE TYPE "CreditTransactionType" AS ENUM ('BONUS', 'GIFT', 'GIFT_ALL', 'REDEEM', 'PURCHASE', 'REFUND', 'ADMIN_ADJUSTMENT');
+CREATE TYPE "WarrantyClaimStatus" AS ENUM ('PENDING', 'REPLACED', 'REFUNDED', 'REJECTED');
 
 CREATE TABLE "users" (
     "id" TEXT NOT NULL,
@@ -35,6 +36,12 @@ CREATE TABLE "products" (
     "category_id" TEXT NOT NULL,
     "name" VARCHAR(120) NOT NULL,
     "description" VARCHAR(2000) NOT NULL DEFAULT '',
+    "plan_details" VARCHAR(500) NOT NULL DEFAULT '',
+    "delivery_instructions" VARCHAR(2000) NOT NULL DEFAULT '',
+    "warranty_hours" INTEGER NOT NULL DEFAULT 24,
+    "media_file_id" VARCHAR(512),
+    "featured" BOOLEAN NOT NULL DEFAULT false,
+    "is_unlimited" BOOLEAN NOT NULL DEFAULT false,
     "price" INTEGER NOT NULL,
     "emoji" VARCHAR(16) NOT NULL DEFAULT '✦',
     "enabled" BOOLEAN NOT NULL DEFAULT true,
@@ -65,6 +72,28 @@ CREATE TABLE "purchases" (
     "amount_paid" INTEGER NOT NULL,
     "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "purchases_pkey" PRIMARY KEY ("id")
+);
+
+CREATE TABLE "stock_subscriptions" (
+    "id" TEXT NOT NULL,
+    "user_id" TEXT NOT NULL,
+    "product_id" TEXT NOT NULL,
+    "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "stock_subscriptions_pkey" PRIMARY KEY ("id")
+);
+
+CREATE TABLE "warranty_claims" (
+    "id" TEXT NOT NULL,
+    "purchase_id" TEXT NOT NULL,
+    "buyer_id" TEXT NOT NULL,
+    "product_id" TEXT NOT NULL,
+    "reason" VARCHAR(500) NOT NULL,
+    "status" "WarrantyClaimStatus" NOT NULL DEFAULT 'PENDING',
+    "resolution_note" VARCHAR(500),
+    "replacement_item_id" TEXT,
+    "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "resolved_at" TIMESTAMPTZ(6),
+    CONSTRAINT "warranty_claims_pkey" PRIMARY KEY ("id")
 );
 
 CREATE TABLE "redeem_codes" (
@@ -142,6 +171,11 @@ CREATE UNIQUE INDEX "purchases_inventory_item_id_key" ON "purchases"("inventory_
 CREATE UNIQUE INDEX "purchases_idempotency_key_key" ON "purchases"("idempotency_key");
 CREATE INDEX "purchases_buyer_id_created_at_idx" ON "purchases"("buyer_id", "created_at");
 CREATE INDEX "purchases_product_id_created_at_idx" ON "purchases"("product_id", "created_at");
+CREATE UNIQUE INDEX "stock_subscriptions_user_id_product_id_key" ON "stock_subscriptions"("user_id", "product_id");
+CREATE INDEX "stock_subscriptions_product_id_created_at_idx" ON "stock_subscriptions"("product_id", "created_at");
+CREATE UNIQUE INDEX "warranty_claims_purchase_id_key" ON "warranty_claims"("purchase_id");
+CREATE INDEX "warranty_claims_status_created_at_idx" ON "warranty_claims"("status", "created_at");
+CREATE INDEX "warranty_claims_buyer_id_created_at_idx" ON "warranty_claims"("buyer_id", "created_at");
 CREATE UNIQUE INDEX "redeem_codes_code_key" ON "redeem_codes"("code");
 CREATE INDEX "redeem_codes_enabled_expires_at_idx" ON "redeem_codes"("enabled", "expires_at");
 CREATE UNIQUE INDEX "code_redemptions_redeem_code_id_user_id_key" ON "code_redemptions"("redeem_code_id", "user_id");
@@ -165,6 +199,16 @@ ALTER TABLE "purchases" ADD CONSTRAINT "purchases_product_id_fkey"
 FOREIGN KEY ("product_id") REFERENCES "products"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "purchases" ADD CONSTRAINT "purchases_inventory_item_id_fkey"
 FOREIGN KEY ("inventory_item_id") REFERENCES "inventory_items"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "stock_subscriptions" ADD CONSTRAINT "stock_subscriptions_user_id_fkey"
+FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "stock_subscriptions" ADD CONSTRAINT "stock_subscriptions_product_id_fkey"
+FOREIGN KEY ("product_id") REFERENCES "products"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "warranty_claims" ADD CONSTRAINT "warranty_claims_purchase_id_fkey"
+FOREIGN KEY ("purchase_id") REFERENCES "purchases"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "warranty_claims" ADD CONSTRAINT "warranty_claims_buyer_id_fkey"
+FOREIGN KEY ("buyer_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "warranty_claims" ADD CONSTRAINT "warranty_claims_product_id_fkey"
+FOREIGN KEY ("product_id") REFERENCES "products"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "code_redemptions" ADD CONSTRAINT "code_redemptions_redeem_code_id_fkey"
 FOREIGN KEY ("redeem_code_id") REFERENCES "redeem_codes"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "code_redemptions" ADD CONSTRAINT "code_redemptions_user_id_fkey"

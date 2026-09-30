@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PrismaClient } from "../generated/prisma/client.js";
 import type { InventoryStatus } from "../generated/prisma/enums.js";
+import { PRODUCT_DELIVERY_PRESETS } from "../utils/credential-parser.js";
 import { NotFoundError, ValidationError } from "../utils/errors.js";
 
 export const MAX_INVENTORY_BATCH = 500;
@@ -120,7 +121,7 @@ export async function listProducts(
   };
   return prisma.product.findMany({
     where,
-    orderBy: [{ createdAt: "desc" }],
+    orderBy: [{ featured: "desc" }, { createdAt: "desc" }],
     include: {
       category: true,
       _count: { select: { inventory: { where: { status: "AVAILABLE" } } } },
@@ -143,7 +144,70 @@ export async function listCategoryProducts(
   const [products, total] = await Promise.all([
     prisma.product.findMany({
       where,
+      orderBy: [{ featured: "desc" }, { createdAt: "desc" }],
+      skip: Math.max(0, page) * pageSize,
+      take: pageSize,
+      include: {
+        category: true,
+        _count: { select: { inventory: { where: { status: "AVAILABLE" } } } },
+      },
+    }),
+    prisma.product.count({ where }),
+  ]);
+  return { products, total, pages: Math.max(1, Math.ceil(total / pageSize)) };
+}
+
+export async function listFeaturedProducts(
+  prisma: PrismaClient,
+  page = 0,
+  pageSize = 8,
+) {
+  const where = {
+    featured: true,
+    enabled: true,
+    deletedAt: null,
+    category: { enabled: true, deletedAt: null },
+  };
+  const [products, total] = await Promise.all([
+    prisma.product.findMany({
+      where,
       orderBy: [{ createdAt: "desc" }],
+      skip: Math.max(0, page) * pageSize,
+      take: pageSize,
+      include: {
+        category: true,
+        _count: { select: { inventory: { where: { status: "AVAILABLE" } } } },
+      },
+    }),
+    prisma.product.count({ where }),
+  ]);
+  return { products, total, pages: Math.max(1, Math.ceil(total / pageSize)) };
+}
+
+export async function searchProducts(
+  prisma: PrismaClient,
+  query: string,
+  page = 0,
+  pageSize = 8,
+) {
+  const trimmed = query.trim();
+  if (trimmed.length < 1 || trimmed.length > 80) {
+    throw new ValidationError("Search query must be 1–80 characters.");
+  }
+  const where = {
+    enabled: true,
+    deletedAt: null,
+    category: { enabled: true, deletedAt: null },
+    OR: [
+      { name: { contains: trimmed, mode: "insensitive" as const } },
+      { description: { contains: trimmed, mode: "insensitive" as const } },
+      { planDetails: { contains: trimmed, mode: "insensitive" as const } },
+    ],
+  };
+  const [products, total] = await Promise.all([
+    prisma.product.findMany({
+      where,
+      orderBy: [{ featured: "desc" }, { createdAt: "desc" }],
       skip: Math.max(0, page) * pageSize,
       take: pageSize,
       include: {
@@ -161,12 +225,17 @@ export async function listAdminProducts(prisma: PrismaClient, page = 0, pageSize
   const [products, total] = await Promise.all([
     prisma.product.findMany({
       where,
-      orderBy: [{ createdAt: "desc" }],
+      orderBy: [{ featured: "desc" }, { createdAt: "desc" }],
       skip: Math.max(0, page) * pageSize,
       take: pageSize,
       include: {
         category: true,
-        _count: { select: { inventory: { where: { status: "AVAILABLE" } } } },
+        _count: {
+          select: {
+            inventory: { where: { status: "AVAILABLE" } },
+            stockSubscriptions: true,
+          },
+        },
       },
     }),
     prisma.product.count({ where }),
@@ -179,7 +248,12 @@ export async function getProduct(prisma: PrismaClient, productId: string) {
     where: { id: productId, deletedAt: null },
     include: {
       category: true,
-      _count: { select: { inventory: { where: { status: "AVAILABLE" } } } },
+      _count: {
+        select: {
+          inventory: { where: { status: "AVAILABLE" } },
+          stockSubscriptions: true,
+        },
+      },
     },
   });
   if (!product) throw new NotFoundError("That product no longer exists.");
@@ -188,7 +262,19 @@ export async function getProduct(prisma: PrismaClient, productId: string) {
 
 export async function createProduct(
   prisma: PrismaClient,
-  input: { categoryId: string; name: string; description?: string; price: number; emoji?: string },
+  input: {
+    categoryId: string;
+    name: string;
+    description?: string;
+    planDetails?: string;
+    deliveryInstructions?: string;
+    warrantyHours?: number;
+    mediaFileId?: string | null;
+    featured?: boolean;
+    isUnlimited?: boolean;
+    price: number;
+    emoji?: string;
+  },
 ) {
   const name = input.name.trim();
   if (name.length < 2 || name.length > 120) throw new ValidationError("Product names must be 2–120 characters.");
@@ -196,6 +282,12 @@ export async function createProduct(
     throw new ValidationError("Price must be a whole number of credits between 0 and 1,000,000,000.");
   }
   if ((input.description?.length ?? 0) > 2_000) throw new ValidationError("Descriptions are limited to 2,000 characters.");
+  if ((input.planDetails?.length ?? 0) > 500) throw new ValidationError("Plan details are limited to 500 characters.");
+  if ((input.deliveryInstructions?.length ?? 0) > 2_000) throw new ValidationError("Delivery instructions are limited to 2,000 characters.");
+  const warrantyHours = input.warrantyHours ?? 24;
+  if (!Number.isSafeInteger(warrantyHours) || warrantyHours < 0 || warrantyHours > 8_760) {
+    throw new ValidationError("Warranty hours must be a whole number between 0 and 8,760.");
+  }
   const category = await prisma.category.findFirst({ where: { id: input.categoryId, deletedAt: null } });
   if (!category) throw new NotFoundError("Choose an existing category first.");
   return prisma.product.create({
@@ -203,6 +295,12 @@ export async function createProduct(
       categoryId: input.categoryId,
       name,
       description: input.description?.trim() ?? "",
+      planDetails: input.planDetails?.trim() ?? "",
+      deliveryInstructions: input.deliveryInstructions?.trim() ?? "",
+      warrantyHours,
+      mediaFileId: input.mediaFileId ?? null,
+      featured: input.featured ?? false,
+      isUnlimited: input.isUnlimited ?? false,
       price: input.price,
       emoji: input.emoji?.trim() || "✦",
     },
@@ -212,11 +310,30 @@ export async function createProduct(
 export async function updateProduct(
   prisma: PrismaClient,
   productId: string,
-  data: { name?: string; description?: string; price?: number; emoji?: string; enabled?: boolean; categoryId?: string },
+  data: {
+    name?: string;
+    description?: string;
+    planDetails?: string;
+    deliveryInstructions?: string;
+    warrantyHours?: number;
+    mediaFileId?: string | null;
+    featured?: boolean;
+    isUnlimited?: boolean;
+    price?: number;
+    emoji?: string;
+    enabled?: boolean;
+    categoryId?: string;
+  },
 ) {
   const update: {
     name?: string;
     description?: string;
+    planDetails?: string;
+    deliveryInstructions?: string;
+    warrantyHours?: number;
+    mediaFileId?: string | null;
+    featured?: boolean;
+    isUnlimited?: boolean;
     price?: number;
     emoji?: string;
     enabled?: boolean;
@@ -228,6 +345,17 @@ export async function updateProduct(
     update.name = value;
   }
   if (data.description !== undefined) update.description = data.description.trim().slice(0, 2_000);
+  if (data.planDetails !== undefined) update.planDetails = data.planDetails.trim().slice(0, 500);
+  if (data.deliveryInstructions !== undefined) update.deliveryInstructions = data.deliveryInstructions.trim().slice(0, 2_000);
+  if (data.warrantyHours !== undefined) {
+    if (!Number.isSafeInteger(data.warrantyHours) || data.warrantyHours < 0 || data.warrantyHours > 8_760) {
+      throw new ValidationError("Warranty hours must be a whole number between 0 and 8,760.");
+    }
+    update.warrantyHours = data.warrantyHours;
+  }
+  if (data.mediaFileId !== undefined) update.mediaFileId = data.mediaFileId;
+  if (data.featured !== undefined) update.featured = data.featured;
+  if (data.isUnlimited !== undefined) update.isUnlimited = data.isUnlimited;
   if (data.price !== undefined) {
     if (!Number.isSafeInteger(data.price) || data.price < 0 || data.price > 1_000_000_000) {
       throw new ValidationError("Price must be a whole number of credits between 0 and 1,000,000,000.");
@@ -244,6 +372,44 @@ export async function updateProduct(
   const product = await prisma.product.findFirst({ where: { id: productId, deletedAt: null } });
   if (!product) throw new NotFoundError("That product no longer exists.");
   return prisma.product.update({ where: { id: productId }, data: update });
+}
+
+export async function applyProductPreset(prisma: PrismaClient, productId: string, presetKey: string) {
+  const preset = PRODUCT_DELIVERY_PRESETS[presetKey];
+  if (!preset) throw new ValidationError("Unknown product preset.");
+  return updateProduct(prisma, productId, {
+    planDetails: preset.planDetails,
+    warrantyHours: preset.warrantyHours,
+    deliveryInstructions: preset.deliveryInstructions,
+  });
+}
+
+export async function cloneProduct(prisma: PrismaClient, productId: string) {
+  const source = await prisma.product.findFirst({ where: { id: productId, deletedAt: null } });
+  if (!source) throw new NotFoundError("That product no longer exists.");
+
+  let candidateName = `${source.name.slice(0, 105)} (Copy)`;
+  let suffix = 2;
+  while (await prisma.product.findFirst({ where: { categoryId: source.categoryId, name: candidateName } })) {
+    candidateName = `${source.name.slice(0, 100)} (Copy ${suffix++})`;
+  }
+
+  return prisma.product.create({
+    data: {
+      categoryId: source.categoryId,
+      name: candidateName,
+      description: source.description,
+      planDetails: source.planDetails,
+      deliveryInstructions: source.deliveryInstructions,
+      warrantyHours: source.warrantyHours,
+      mediaFileId: source.mediaFileId,
+      featured: false,
+      isUnlimited: source.isUnlimited,
+      price: source.price,
+      emoji: source.emoji,
+      enabled: false,
+    },
+  });
 }
 
 export async function archiveProduct(prisma: PrismaClient, productId: string) {
@@ -307,6 +473,36 @@ export async function listAvailableInventory(
   });
 }
 
+export async function getAvailableInventoryItem(prisma: PrismaClient, itemId: string) {
+  const item = await prisma.inventoryItem.findFirst({
+    where: { id: itemId, status: "AVAILABLE" },
+    include: { product: { select: { id: true, name: true, emoji: true } } },
+  });
+  if (!item) throw new NotFoundError("That available stock item no longer exists.");
+  return item;
+}
+
+export async function listAllAvailablePayloads(prisma: PrismaClient, productId: string) {
+  const product = await prisma.product.findFirst({ where: { id: productId, deletedAt: null } });
+  if (!product) throw new NotFoundError("That product no longer exists.");
+  const items = await prisma.inventoryItem.findMany({
+    where: { productId, status: "AVAILABLE" },
+    orderBy: { createdAt: "asc" },
+    select: { payload: true },
+  });
+  return { product, payloads: items.map((item) => item.payload) };
+}
+
+export async function clearAvailableInventory(prisma: PrismaClient, productId: string) {
+  const product = await prisma.product.findFirst({ where: { id: productId, deletedAt: null } });
+  if (!product) throw new NotFoundError("That product no longer exists.");
+  const result = await prisma.inventoryItem.updateMany({
+    where: { productId, status: "AVAILABLE" },
+    data: { status: "REMOVED" as InventoryStatus },
+  });
+  return { removed: result.count };
+}
+
 export async function removeInventoryItem(prisma: PrismaClient, itemId: string) {
   const changed = await prisma.inventoryItem.updateMany({
     where: { id: itemId, status: "AVAILABLE" },
@@ -318,5 +514,51 @@ export async function removeInventoryItem(prisma: PrismaClient, itemId: string) 
 export async function countAvailableInventory(prisma: PrismaClient, productId?: string) {
   return prisma.inventoryItem.count({
     where: { status: "AVAILABLE", ...(productId ? { productId } : {}) },
+  });
+}
+
+export async function isSubscribedToStock(
+  prisma: PrismaClient,
+  userId: string,
+  productId: string,
+): Promise<boolean> {
+  const sub = await prisma.stockSubscription.findUnique({
+    where: { userId_productId: { userId, productId } },
+  });
+  return Boolean(sub);
+}
+
+export async function toggleStockSubscription(
+  prisma: PrismaClient,
+  userId: string,
+  productId: string,
+): Promise<{ subscribed: boolean }> {
+  const product = await prisma.product.findFirst({ where: { id: productId, deletedAt: null } });
+  if (!product) throw new NotFoundError("That product no longer exists.");
+  const existing = await prisma.stockSubscription.findUnique({
+    where: { userId_productId: { userId, productId } },
+  });
+  if (existing) {
+    await prisma.stockSubscription.delete({ where: { id: existing.id } });
+    return { subscribed: false };
+  }
+  await prisma.stockSubscription.create({
+    data: { id: randomUUID(), userId, productId },
+  });
+  return { subscribed: true };
+}
+
+export async function consumeStockSubscribers(prisma: PrismaClient, productId: string) {
+  return prisma.$transaction(async (tx) => {
+    const subs = await tx.stockSubscription.findMany({
+      where: { productId },
+      include: { user: { select: { id: true, telegramId: true, isBlocked: true } } },
+    });
+    if (subs.length > 0) {
+      await tx.stockSubscription.deleteMany({ where: { productId } });
+    }
+    return subs
+      .map((sub) => sub.user)
+      .filter((user) => !user.isBlocked);
   });
 }

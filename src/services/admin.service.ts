@@ -103,6 +103,8 @@ export async function performConfirmedReset(
     if (!challenge.count) throw new ValidationError("Reset confirmation invalid or expired. Nothing was deleted.");
 
     const preview = await getResetPreview(tx);
+    await tx.warrantyClaim.deleteMany();
+    await tx.stockSubscription.deleteMany();
     await tx.purchase.deleteMany();
     await tx.codeRedemption.deleteMany();
     await tx.inventoryItem.deleteMany();

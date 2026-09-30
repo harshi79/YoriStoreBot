@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { GrammyError, InlineKeyboard } from "grammy";
+import { GrammyError, InlineKeyboard, InputFile } from "grammy";
 import type { Bot } from "grammy";
 import type { BotContext } from "../types/context.js";
 import type { BotDependencies } from "../bot/dependencies.js";
@@ -12,9 +12,13 @@ import {
   showCategoryProductsAdmin,
   showProductsAdmin,
   showProductAdmin,
+  showProductPresetsAdmin,
   showInventoryAdmin,
   showInventoryProducts,
   showInventoryList,
+  showInventoryItemPeek,
+  showWarrantyClaimsAdmin,
+  showWarrantyClaimDetail,
   showUsersAdmin,
   showUserDetail,
   showCodesAdmin,
@@ -26,36 +30,67 @@ import {
 } from "../bot/admin-views.js";
 import {
   claimBonus,
+  sendOrderReceiptFile,
   showBonusStatus,
   showCategory,
+  showFeaturedStore,
   showHelp,
   showHome,
+  showOrderDetail,
   showOrders,
   showProduct,
   showProfile,
   showStore,
+  showWarrantyPrompt,
 } from "../bot/views.js";
 import { editOrReply } from "../bot/render.js";
-import { beginAdminFlow } from "../commands/admin-flow.js";
+import { beginAdminFlow, handleUserWarrantySubmission } from "../commands/admin-flow.js";
 import { beginReset, cancelReset, completeReset, continueReset, requestRestart, sendStoreExport } from "../commands/admin.js";
 import { broadcastToUsers } from "../services/broadcast.service.js";
 import { changeCredits } from "../services/credits.service.js";
-import { purchaseProduct } from "../services/purchases.service.js";
+import {
+  purchaseProduct,
+  resolveWarrantyClaimRefund,
+  resolveWarrantyClaimReject,
+  resolveWarrantyClaimReplace,
+} from "../services/purchases.service.js";
 import type { PurchaseResult } from "../services/purchases.service.js";
-import { listCategories, getProduct, updateCategory, updateProduct, archiveCategory, archiveProduct, reorderCategory, removeInventoryItem } from "../services/store.service.js";
+import {
+  applyProductPreset,
+  archiveCategory,
+  archiveProduct,
+  clearAvailableInventory,
+  cloneProduct,
+  getProduct,
+  listAllAvailablePayloads,
+  listCategories,
+  removeInventoryItem,
+  reorderCategory,
+  toggleStockSubscription,
+  updateCategory,
+  updateProduct,
+} from "../services/store.service.js";
 import { setRedeemCodeEnabled } from "../services/codes.service.js";
-import { escapeHtml, smallCaps } from "../utils/format.js";
+import { findUserByTelegramId } from "../services/users.service.js";
+import { creditLabel, escapeFilenamePart, escapeHtml, smallCaps } from "../utils/format.js";
 import { DomainError, NotFoundError, PriceChangedError, ValidationError } from "../utils/errors.js";
-import { productMessage, purchaseDeliveryMessage } from "../messages/iris.js";
+import { productMessage, purchaseDeliveryMessage, renderParsedPayloadBlock } from "../messages/iris.js";
 
 function adminKeyboardFor(data: string) {
   return data.startsWith("admin:") || data.startsWith("reset:") ? adminPanelKeyboard() : mainKeyboard();
 }
 
+const QUICK_WARRANTY_REASONS: Record<string, string> = {
+  invalid_creds: "Invalid email or password when attempting to log in",
+  locked: "Account is locked, suspended, or requires 2FA verification",
+  expired: "Account subscription/plan is expired or showing free tier",
+};
+
 async function showPurchaseConfirmation(
   ctx: BotContext,
   deps: BotDependencies,
   productId: string,
+  quantity = 1,
 ): Promise<void> {
   const product = await getProduct(deps.database.prisma, productId);
   const user = await deps.database.prisma.user.findUnique({ where: { telegramId: BigInt(ctx.from!.id) } });
@@ -70,24 +105,41 @@ async function showPurchaseConfirmation(
     await editOrReply(ctx, "⚠️ This product is out of stock right now.", new InlineKeyboard().text("◀ STORE", `store:category:${product.categoryId}:0`), deps.logger);
     return;
   }
+  const maxAvailable = product.isUnlimited ? 5 : Math.min(5, product._count.inventory);
+  const safeQty = Math.max(1, Math.min(quantity, maxAvailable));
+  const totalCost = product.price * safeQty;
+  const qtyNote = safeQty > 1
+    ? `\n📦 <b>${smallCaps("Quantity")}:</b> ${safeQty}x (${creditLabel(totalCost)} total)`
+    : "";
   const text = `${productMessage({
     emoji: product.emoji,
     name: product.name,
     category: product.category.name,
     description: product.description,
+    planDetails: product.planDetails,
+    warrantyHours: product.warrantyHours,
+    featured: product.featured,
     price: product.price,
     stock: product._count.inventory,
     credits: user.credits,
-  })}\n\n🛒 <b>${smallCaps("Confirm this purchase?")}</b>\n${smallCaps("Your credits are charged only when stock is assigned successfully.")}`;
-  const nonce = randomBytes(8).toString("hex");
+  })}${qtyNote}\n\n🛒 <b>${smallCaps("Confirm this purchase?")}</b>\n${smallCaps("Your credits are charged only when stock is assigned successfully.")}`;
+  const nonce = ctx.session.purchaseConfirmation?.productId === product.id
+    ? ctx.session.purchaseConfirmation.nonce
+    : randomBytes(8).toString("hex");
   ctx.session.purchaseConfirmation = {
     productId: product.id,
     nonce,
     telegramId: ctx.from!.id,
     expectedPrice: product.price,
+    quantity: safeQty,
     expiresAt: Date.now() + 2 * 60 * 1_000,
   };
-  await editOrReply(ctx, text, confirmPurchaseKeyboard(product.id, nonce, product.price), deps.logger);
+  await editOrReply(
+    ctx,
+    text,
+    confirmPurchaseKeyboard(product.id, nonce, product.price, safeQty, maxAvailable),
+    deps.logger,
+  );
 }
 
 async function handleUserCallback(ctx: BotContext, deps: BotDependencies, data: string): Promise<boolean> {
@@ -99,7 +151,56 @@ async function handleUserCallback(ctx: BotContext, deps: BotDependencies, data: 
   else if (data === "nav:help") await showHelp(ctx, deps);
   else if (data === "bonus:claim") await claimBonus(ctx, deps, true);
   else if (data === "noop") return true;
-  else if (data.startsWith("store:category:")) {
+  else if (data.startsWith("orders:page:")) {
+    const page = Number(data.split(":")[2] ?? 0);
+    await showOrders(ctx, deps, page);
+  } else if (data.startsWith("order:view:")) {
+    const purchaseId = data.split(":")[2];
+    if (!purchaseId) throw new Error("Order link is invalid.");
+    await showOrderDetail(ctx, deps, purchaseId);
+  } else if (data.startsWith("order:txt:")) {
+    const purchaseId = data.split(":")[2];
+    if (!purchaseId) throw new Error("Order link is invalid.");
+    await sendOrderReceiptFile(ctx, deps, purchaseId);
+  } else if (data.startsWith("order:warranty:")) {
+    const purchaseId = data.split(":")[2];
+    if (!purchaseId) throw new Error("Order link is invalid.");
+    await showWarrantyPrompt(ctx, deps, purchaseId);
+  } else if (data.startsWith("order:claim:")) {
+    const parts = data.split(":");
+    const purchaseId = parts[2];
+    const reasonKey = parts[3];
+    const reason = reasonKey ? QUICK_WARRANTY_REASONS[reasonKey] : undefined;
+    if (!purchaseId || !reason) throw new Error("Invalid warranty claim option.");
+    await handleUserWarrantySubmission(ctx, deps, purchaseId, reason);
+  } else if (data.startsWith("store:featured:")) {
+    const page = Number(data.split(":")[2] ?? 0);
+    await showFeaturedStore(ctx, deps, page);
+  } else if (data === "store:search:start") {
+    ctx.session.userFlow = { kind: "store:search" };
+    await editOrReply(
+      ctx,
+      `🔍 <b>${smallCaps("Search Iris store")}</b>\n\nSend a keyword (e.g. <code>crunchyroll</code>, <code>netflix</code>, <code>premium</code>) or tap below to go back.`,
+      new InlineKeyboard().text("◀ STORE", "nav:store").text("🏠 HOME", "nav:home"),
+      deps.logger,
+    );
+  } else if (data.startsWith("store:notify:")) {
+    const productId = data.split(":")[2];
+    if (!productId) throw new Error("That product link is invalid.");
+    const user = await findUserByTelegramId(deps.database.prisma, ctx.from!.id);
+    await toggleStockSubscription(deps.database.prisma, user.id, productId);
+    await showProduct(ctx, deps, productId);
+  } else if (data.startsWith("store:banner:")) {
+    const productId = data.split(":")[2];
+    if (!productId) throw new Error("That product link is invalid.");
+    const product = await getProduct(deps.database.prisma, productId);
+    if (product.mediaFileId) {
+      await ctx.replyWithPhoto(product.mediaFileId, {
+        caption: `${escapeHtml(product.emoji)} <b>${escapeHtml(product.name)}</b>`,
+        parse_mode: "HTML",
+      });
+    }
+  } else if (data.startsWith("store:category:")) {
     const [, , categoryId, page] = data.split(":");
     if (!categoryId) throw new Error("That category link is invalid.");
     await showCategory(ctx, deps, categoryId, Number(page ?? 0));
@@ -110,7 +211,12 @@ async function handleUserCallback(ctx: BotContext, deps: BotDependencies, data: 
   } else if (data.startsWith("buy:start:")) {
     const productId = data.split(":")[2];
     if (!productId) throw new Error("That product link is invalid.");
-    await showPurchaseConfirmation(ctx, deps, productId);
+    ctx.session.purchaseConfirmation = null;
+    await showPurchaseConfirmation(ctx, deps, productId, 1);
+  } else if (data.startsWith("buy:qty:")) {
+    const [, , productId, rawQty] = data.split(":");
+    if (!productId) throw new Error("That product link is invalid.");
+    await showPurchaseConfirmation(ctx, deps, productId, Number(rawQty ?? 1));
   } else if (data.startsWith("buy:confirm:")) {
     const parts = data.split(":");
     const productId = parts[2];
@@ -140,12 +246,18 @@ async function handleUserCallback(ctx: BotContext, deps: BotDependencies, data: 
         productId,
         `iris:${ctx.from!.id}:${nonce}`,
         expectedPrice,
+        intent.quantity ?? 1,
       );
     } catch (error) {
       if (error instanceof PriceChangedError) ctx.session.purchaseConfirmation = null;
       throw error;
     }
-    const keyboard = new InlineKeyboard().text("🛍 BACK TO STORE", "nav:store").text("📦 MY ORDERS", "nav:orders");
+    const keyboard = new InlineKeyboard()
+      .text("📄 DOWNLOAD .TXT", `order:txt:${result.purchaseId}`)
+      .text("🛠 REPORT ISSUE", `order:warranty:${result.purchaseId}`)
+      .row()
+      .text("🛍 BACK TO STORE", "nav:store")
+      .text("📦 MY ORDERS", "nav:orders");
     await editOrReply(ctx, purchaseDeliveryMessage(result), keyboard, deps.logger);
     deps.logger.info({ telegramId: ctx.from!.id, productId, purchaseId: result.purchaseId, repeated: result.repeated }, "Digital product delivered");
   } else {
@@ -209,22 +321,46 @@ async function handleAdminCallback(
     await showProductsAdmin(ctx, deps, Number(parts[2] ?? 0));
   } else if (parts[1] === "product" && parts[2] === "view" && parts[3]) {
     await showProductAdmin(ctx, deps, parts[3]);
+  } else if (parts[1] === "product" && parts[2] === "presets" && parts[3]) {
+    await showProductPresetsAdmin(ctx, deps, parts[3]);
+  } else if (parts[1] === "product" && parts[2] === "preset" && parts[3] && parts[4]) {
+    await applyProductPreset(deps.database.prisma, parts[3], parts[4]);
+    await showProductAdmin(ctx, deps, parts[3]);
+  } else if (parts[1] === "product" && parts[2] === "featured" && parts[3]) {
+    const product = await getProduct(deps.database.prisma, parts[3]);
+    await updateProduct(deps.database.prisma, product.id, { featured: !product.featured });
+    await showProductAdmin(ctx, deps, product.id);
+  } else if (parts[1] === "product" && parts[2] === "unlimited" && parts[3]) {
+    const product = await getProduct(deps.database.prisma, parts[3]);
+    await updateProduct(deps.database.prisma, product.id, { isUnlimited: !product.isUnlimited });
+    await showProductAdmin(ctx, deps, product.id);
+  } else if (parts[1] === "product" && parts[2] === "clone" && parts[3]) {
+    const cloned = await cloneProduct(deps.database.prisma, parts[3]);
+    await showProductAdmin(ctx, deps, cloned.id);
   } else if (parts[1] === "product" && parts[2] === "edit" && parts[3] && parts[4]) {
     const kind = parts[3];
     const productId = parts[4];
     const flow = kind === "name" ? { kind: "product:edit:name" as const, productId }
       : kind === "description" ? { kind: "product:edit:description" as const, productId }
+      : kind === "plan" ? { kind: "product:edit:planDetails" as const, productId }
+      : kind === "instructions" ? { kind: "product:edit:instructions" as const, productId }
+      : kind === "warranty" ? { kind: "product:edit:warranty" as const, productId }
+      : kind === "media" ? { kind: "product:edit:media" as const, productId }
       : kind === "price" ? { kind: "product:edit:price" as const, productId }
       : kind === "emoji" ? { kind: "product:edit:emoji" as const, productId }
       : null;
     if (!flow) throw new Error("Unknown product field.");
-    const prompts = {
+    const prompts: Record<string, string> = {
       name: "✏️ Send the new product name.",
       description: "📝 Send the new description, or /skip to clear it.",
+      plan: "💎 Send the Account / Plan Specs shown on the product card and receipt (e.g. <code>Mega Fan · Ad-Free · 4K · 30 Days</code>), or /skip to clear it.",
+      instructions: "📜 Send the Login Guide & Rules delivered to buyers upon purchase (e.g. <code>• Do NOT change password\n• Use 1 screen</code>), or /skip to clear it.",
+      warranty: "🛡 Send the replacement warranty window in whole hours (0–8,760). Example: <code>24</code> for 24h, <code>720</code> for 30 days, or <code>0</code> for no warranty.",
+      media: "🖼 Upload a photo now to set as the product banner, or send /skip to remove the current banner.",
       price: "💳 Send the new whole-credit price (0–1,000,000,000).",
       emoji: "🎨 Send the new product icon, or /skip to use ✦.",
     };
-    await beginAdminFlow(ctx, deps, flow, prompts[kind as keyof typeof prompts]);
+    await beginAdminFlow(ctx, deps, flow, prompts[kind]!);
   } else if (parts[1] === "product" && parts[2] === "toggle" && parts[3]) {
     const product = await getProduct(deps.database.prisma, parts[3]);
     await updateProduct(deps.database.prisma, product.id, { enabled: !product.enabled });
@@ -254,16 +390,60 @@ async function handleAdminCallback(
     await showInventoryAdmin(ctx, deps);
   } else if (parts[1] === "inventory" && parts[2] === "category" && parts[3]) {
     await showInventoryProducts(ctx, deps, parts[3]);
-  } else if (parts[1] === "stock" && parts[2] === "product" && parts[3]) {
+  } else if (parts[1] === "stock" && (parts[2] === "product" || parts[2] === "add") && parts[3]) {
     const product = await getProduct(deps.database.prisma, parts[3]);
-    await beginAdminFlow(ctx, deps, { kind: "inventory:add:payload", productId: product.id },
-      `📥 <b>Add authorized stock: ${escapeHtml(product.name)}</b>\n\nSend one inventory code/license/value per line, or upload a .txt/.csv file with one item per line.\n\nMaximum 500 lines per batch, 3,500 characters per item. Use /cancel to stop.`);
-  } else if (parts[1] === "stock" && parts[2] === "add" && parts[3]) {
-    const product = await getProduct(deps.database.prisma, parts[3]);
-    await beginAdminFlow(ctx, deps, { kind: "inventory:add:payload", productId: product.id },
-      `📥 <b>Add authorized stock: ${escapeHtml(product.name)}</b>\n\nSend one inventory code/license/value per line, or upload a .txt/.csv file with one item per line.\n\nMaximum 500 lines per batch, 3,500 characters per item. Use /cancel to stop.`);
+    await beginAdminFlow(
+      ctx,
+      deps,
+      { kind: "inventory:add:payload", productId: product.id },
+      `📥 <b>Add authorized stock: ${escapeHtml(product.name)}</b>\n\n` +
+        `Send one item per line, or upload a .txt/.csv file.\n\n` +
+        `💡 <b>Supported formats (auto-parsed for buyers):</b>\n` +
+        `• Classic: <code>email@domain.com:password</code>\n` +
+        `• With account details:\n<code>email:pass | Plan: Mega Fan | Expiry: 2027-01-15 | Region: US | Profile: #2 | PIN: 1234</code>\n` +
+        `• Colon-extended: <code>email:pass:Mega Fan:2027-01-15</code>\n` +
+        `• License key / code: <code>KEY-XXXX-YYYY-ZZZZ</code>\n\n` +
+        `Maximum 500 lines per batch, 3,500 characters per item. Use /cancel to stop.`,
+    );
   } else if (parts[1] === "stock" && parts[2] === "list" && parts[3]) {
     await showInventoryList(ctx, deps, parts[3], Number(parts[4] ?? 0));
+  } else if (parts[1] === "stock" && parts[2] === "peek" && parts[3]) {
+    await showInventoryItemPeek(ctx, deps, parts[3]);
+  } else if (parts[1] === "stock" && parts[2] === "export" && parts[3]) {
+    const { product, payloads } = await listAllAvailablePayloads(deps.database.prisma, parts[3]);
+    if (!payloads.length) {
+      await editOrReply(ctx, `⚠️ No available stock to export for <b>${escapeHtml(product.name)}</b>.`, new InlineKeyboard().text("◀ PRODUCT", `admin:product:view:${product.id}`), deps.logger);
+      return true;
+    }
+    const filename = `stock-${escapeFilenamePart(product.name)}-${Date.now()}.txt`;
+    await ctx.replyWithDocument(new InputFile(Buffer.from(payloads.join("\n") + "\n", "utf8"), filename), {
+      caption: `📤 Exported ${payloads.length} available stock item(s) for ${product.emoji} ${product.name}. Keep this file private.`,
+    });
+  } else if (parts[1] === "stock" && parts[2] === "clear" && parts[3]) {
+    const product = await getProduct(deps.database.prisma, parts[3]);
+    await editOrReply(
+      ctx,
+      `⚠️ <b>Clear all ${product._count.inventory} available stock item(s) for ${escapeHtml(product.name)}?</b>\n\nSold history is preserved; only unsold available items will be removed.`,
+      confirmDangerKeyboard(`admin:stock:clearconfirm:${product.id}`, `admin:stock:list:${product.id}:0`),
+      deps.logger,
+    );
+  } else if (parts[1] === "stock" && parts[2] === "clearconfirm" && parts[3]) {
+    await clearAvailableInventory(deps.database.prisma, parts[3]);
+    await showInventoryList(ctx, deps, parts[3], 0);
+  } else if (parts[1] === "stock" && parts[2] === "announce" && parts[3]) {
+    const product = await getProduct(deps.database.prisma, parts[3]);
+    const text = `🔥 RESTOCK ALERT 🔥\n\n${product.emoji} ${product.name} is now in stock!\n` +
+      (product.planDetails ? `💎 ${product.planDetails}\n` : "") +
+      `💳 Price: ${product.price} credits\n` +
+      `📦 Available: ${product._count.inventory} in stock\n\n` +
+      `Use /store to grab yours before it sells out!`;
+    ctx.session.adminFlow = { kind: "broadcast:confirm", text };
+    await editOrReply(
+      ctx,
+      `📢 <b>Preview restock announcement</b>\n\n${escapeHtml(text)}`,
+      new InlineKeyboard().text("📢 SEND TO USERS", "admin:broadcast:send").text("❌ CANCEL", "admin:broadcast:cancel"),
+      deps.logger,
+    );
   } else if (parts[1] === "stock" && parts[2] === "remove" && parts[3]) {
     const item = await deps.database.prisma.inventoryItem.findFirst({
       where: { id: parts[3], status: "AVAILABLE" },
@@ -281,6 +461,46 @@ async function handleAdminCallback(
     if (!item) throw new NotFoundError("That stock item no longer exists.");
     await removeInventoryItem(deps.database.prisma, parts[3]);
     await showInventoryList(ctx, deps, item.productId, 0);
+  } else if (data.startsWith("admin:warranty:view:") && parts[3]) {
+    await showWarrantyClaimDetail(ctx, deps, parts[3]);
+  } else if (data.startsWith("admin:warranty:replace:") && parts[3]) {
+    const resolved = await resolveWarrantyClaimReplace(deps.database.prisma, parts[3]);
+    await ctx.api.sendMessage(
+      Number(resolved.buyerTelegramId),
+      `🔄 <b>${smallCaps("Warranty replacement delivered")}</b>\n\n` +
+        `Your claim for ${escapeHtml(resolved.product.emoji)} <b>${escapeHtml(resolved.product.name)}</b> (<code>#${escapeHtml(resolved.purchaseId.slice(0, 8))}</code>) was approved!\n\n` +
+        `🔐 <b>${smallCaps("Your new replacement delivery")}</b>\n` +
+        renderParsedPayloadBlock(resolved.replacementPayload),
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("📄 DOWNLOAD .TXT", `order:txt:${resolved.purchaseId}`)
+          .text("📦 VIEW ORDER", `order:view:${resolved.purchaseId}`),
+      },
+    ).catch((err: unknown) => deps.logger.warn({ err }, "Could not notify buyer of warranty replacement"));
+    await showWarrantyClaimDetail(ctx, deps, parts[3]);
+  } else if (data.startsWith("admin:warranty:refund:") && parts[3]) {
+    const resolved = await resolveWarrantyClaimRefund(deps.database.prisma, parts[3]);
+    await ctx.api.sendMessage(
+      Number(resolved.buyerTelegramId),
+      `💳 <b>${smallCaps("Warranty refund issued")}</b>\n\n` +
+        `Your claim for ${escapeHtml(resolved.product.emoji)} <b>${escapeHtml(resolved.product.name)}</b> (<code>#${escapeHtml(resolved.purchaseId.slice(0, 8))}</code>) was resolved with a full credit refund.\n\n` +
+        `✦ +${creditLabel(resolved.refundedCredits)}\n` +
+        `💰 ${smallCaps("New balance")}: ${creditLabel(resolved.newBalance)}`,
+      { parse_mode: "HTML", reply_markup: mainKeyboard() },
+    ).catch((err: unknown) => deps.logger.warn({ err }, "Could not notify buyer of warranty refund"));
+    await showWarrantyClaimDetail(ctx, deps, parts[3]);
+  } else if (data.startsWith("admin:warranty:reject:") && parts[3]) {
+    const resolved = await resolveWarrantyClaimReject(deps.database.prisma, parts[3]);
+    await ctx.api.sendMessage(
+      Number(resolved.buyerTelegramId),
+      `ℹ️ <b>${smallCaps("Warranty claim update")}</b>\n\n` +
+        `Your claim for ${escapeHtml(resolved.product.emoji)} <b>${escapeHtml(resolved.product.name)}</b> (<code>#${escapeHtml(resolved.purchaseId.slice(0, 8))}</code>) was declined by the store owner.`,
+      { parse_mode: "HTML", reply_markup: mainKeyboard() },
+    ).catch((err: unknown) => deps.logger.warn({ err }, "Could not notify buyer of warranty rejection"));
+    await showWarrantyClaimDetail(ctx, deps, parts[3]);
+  } else if (data.startsWith("admin:warranty:")) {
+    await showWarrantyClaimsAdmin(ctx, deps, Number(parts[2] ?? 0));
   } else if (data === "admin:users:0" || data.startsWith("admin:users:")) {
     await showUsersAdmin(ctx, deps, Number(parts[2] ?? 0));
   } else if (parts[1] === "user" && parts[2] && parts[2] !== "gift" && parts[2] !== "remove") {
@@ -378,7 +598,12 @@ async function startBroadcast(ctx: BotContext, deps: BotDependencies, text: stri
 export function registerCallbacks(bot: Bot<BotContext>, deps: BotDependencies): void {
   bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
-    if (!data.startsWith("buy:confirm:")) ctx.session.purchaseConfirmation = null;
+    if (!data.startsWith("buy:confirm:") && !data.startsWith("buy:qty:")) {
+      ctx.session.purchaseConfirmation = null;
+    }
+    if (!data.startsWith("order:claim:") && !data.startsWith("order:warranty:") && data !== "store:search:start") {
+      ctx.session.userFlow = null;
+    }
     const ownerAction = data.startsWith("admin:") || data.startsWith("reset:");
     if (ownerAction && !isOwner(ctx, deps.config)) {
       await ctx.answerCallbackQuery({ text: "⛔ Owner access only.", show_alert: true }).catch(() => undefined);

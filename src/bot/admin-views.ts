@@ -12,12 +12,22 @@ import {
   inventoryProductsKeyboard,
   productDetailKeyboard,
   productListKeyboard,
+  productPresetsKeyboard,
   userPaginationKeyboard,
 } from "../keyboards/inline.js";
 import { editOrReply } from "./render.js";
-import { listCategories, listAdminProducts, listCategoryProducts, getProduct, listAvailableInventory } from "../services/store.service.js";
+import {
+  getAvailableInventoryItem,
+  getProduct,
+  listAdminProducts,
+  listAvailableInventory,
+  listCategories,
+  listCategoryProducts,
+} from "../services/store.service.js";
+import { getWarrantyClaimDetail, listWarrantyClaims } from "../services/purchases.service.js";
 import { listRedeemCodes } from "../services/codes.service.js";
 import { listUsersPage, getStoreStatistics } from "../services/analytics.service.js";
+import { renderParsedPayloadBlock } from "../messages/iris.js";
 import { creditLabel, escapeHtml, formatDate, smallCaps } from "../utils/format.js";
 
 const PAGE_SIZE = 8;
@@ -67,7 +77,7 @@ export async function showProductsAdmin(ctx: BotContext, deps: BotDependencies, 
   const result = await listAdminProducts(deps.database.prisma, page, PAGE_SIZE);
   await editOrReply(
     ctx,
-    `📦 <b>${smallCaps("Products")}</b>\n\n${result.total} product(s) · tap one to edit.`,
+    `📦 <b>${smallCaps("Products")}</b>\n\n${result.total} product(s) · tap one to edit details, presets, or stock.`,
     productListKeyboard(result.products, page, result.pages, "admin:panel", "admin"),
     deps.logger,
   );
@@ -95,20 +105,39 @@ export async function showCategoryProductsAdmin(
 
 export async function showProductAdmin(ctx: BotContext, deps: BotDependencies, productId: string): Promise<void> {
   const product = await getProduct(deps.database.prisma, productId);
-  const text = `${escapeHtml(product.emoji)} <b>${escapeHtml(product.name)}</b>\n\n` +
+  const text = `${escapeHtml(product.emoji)} <b>${escapeHtml(product.name)}</b>${product.featured ? " 🔥" : ""}\n\n` +
     `<b>Category:</b> ${escapeHtml(product.category.name)}\n` +
     `<b>Price:</b> ${creditLabel(product.price)}\n` +
-    `<b>Available stock:</b> ${product._count.inventory}\n` +
-    `<b>Status:</b> ${product.enabled ? "Enabled" : "Disabled"}\n\n` +
-    `${escapeHtml(product.description || "No description")}`;
+    `<b>Delivery mode:</b> ${product.isUnlimited ? "♾ Unlimited / Reusable" : "1️⃣ One-Time Stock"}\n` +
+    `<b>Available stock:</b> ${product.isUnlimited && product._count.inventory > 0 ? `♾ Unlimited (${product._count.inventory} template)` : product._count.inventory}\n` +
+    `<b>Restock subscribers:</b> ${product._count.stockSubscriptions}\n` +
+    `<b>Warranty:</b> ${product.warrantyHours > 0 ? `${product.warrantyHours}h replacement` : "None (0h)"}\n` +
+    `<b>Banner photo:</b> ${product.mediaFileId ? "Attached 🖼" : "None"}\n` +
+    `<b>Status:</b> ${product.enabled ? "Enabled" : "Disabled"}${product.featured ? " · Featured 🔥" : ""}\n\n` +
+    `💎 <b>Plan / Account specs:</b>\n${escapeHtml(product.planDetails || "Not set (use ⚡ PRESETS or 💎 PLAN SPECS)")}\n\n` +
+    `📜 <b>Login guide & rules:</b>\n${escapeHtml(product.deliveryInstructions || "Not set (use ⚡ PRESETS or 📜 LOGIN GUIDE)")}\n\n` +
+    `📝 <b>Description:</b>\n${escapeHtml(product.description || "No description")}`;
   await editOrReply(ctx, text, productDetailKeyboard(product), deps.logger);
+}
+
+export async function showProductPresetsAdmin(
+  ctx: BotContext,
+  deps: BotDependencies,
+  productId: string,
+): Promise<void> {
+  const product = await getProduct(deps.database.prisma, productId);
+  const text = `⚡ <b>${smallCaps("Delivery presets")} · ${escapeHtml(product.name)}</b>\n\n` +
+    `${smallCaps("Choose a 1-click preset to automatically configure Account/Plan Specs, 24h Warranty, and Buyer Login Rules (e.g. for Crunchyroll, Netflix, Spotify, Steam, or License Keys), or customize each field manually.")}\n\n` +
+    `💎 <b>Current specs:</b> ${escapeHtml(product.planDetails || "None")}\n` +
+    `🛡 <b>Current warranty:</b> ${product.warrantyHours}h`;
+  await editOrReply(ctx, text, productPresetsKeyboard(product.id), deps.logger);
 }
 
 export async function showInventoryAdmin(ctx: BotContext, deps: BotDependencies): Promise<void> {
   const categories = await listCategories(deps.database.prisma);
   await editOrReply(
     ctx,
-    `📋 <b>${smallCaps("Inventory")}</b>\n\n${smallCaps("Select a category, then a product to add or review stock.")}\n\n${smallCaps("Inventory payloads are hidden from list views and only delivered to the purchasing user.")}`,
+    `📋 <b>${smallCaps("Inventory")}</b>\n\n${smallCaps("Select a category, then a product to add, inspect, export, or clear stock.")}\n\n${smallCaps("Supports classic email:pass or rich lines like:")}\n<code>email:pass | Plan: Mega Fan | Expiry: 2027-01-15 | Profile: #2</code>`,
     inventoryCategoriesKeyboard(categories),
     deps.logger,
   );
@@ -146,20 +175,117 @@ export async function showInventoryList(
   ]);
   const keyboard = new InlineKeyboard();
   for (const item of items) {
-    keyboard.text(
-      `🟢 ${item.id.slice(0, 8)} · ${formatDate(item.createdAt)}`.slice(0, 60),
-      `admin:stock:remove:${item.id}`,
-    ).row();
+    keyboard
+      .text(`👁 ${item.id.slice(0, 8)} · ${formatDate(item.createdAt)}`.slice(0, 46), `admin:stock:peek:${item.id}`)
+      .text("🗑", `admin:stock:remove:${item.id}`)
+      .row();
   }
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   if (page > 0) keyboard.text("◀", `admin:stock:list:${productId}:${page - 1}`);
   keyboard.text(`${page + 1}/${pages}`, "noop");
   if (page + 1 < pages) keyboard.text("▶", `admin:stock:list:${productId}:${page + 1}`);
-  keyboard.row().text("➕ ADD STOCK", `admin:stock:add:${productId}`);
+  keyboard.row()
+    .text("➕ ADD STOCK", `admin:stock:add:${productId}`)
+    .text("📤 EXPORT .TXT", `admin:stock:export:${productId}`);
+  if (total > 0) {
+    keyboard.row().text("🧹 CLEAR ALL STOCK", `admin:stock:clear:${productId}`);
+  }
   keyboard.row().text("◀ PRODUCT", `admin:product:view:${productId}`);
   const text = items.length
-    ? `📋 <b>${escapeHtml(product.name)} · available items</b>\n\n${total} item(s). Select an item only if you want to remove it.\n\n${items.map((item) => `• <code>${item.id.slice(0, 8)}</code> · ${escapeHtml(formatDate(item.createdAt))}`).join("\n")}`
+    ? `📋 <b>${escapeHtml(product.name)} · available items</b>\n\n${total} item(s). Tap 👁 on an item to inspect its credentials/details, or 🗑 to remove it.\n\n${items.map((item) => `• <code>${item.id.slice(0, 8)}</code> · ${escapeHtml(formatDate(item.createdAt))}`).join("\n")}`
     : `📋 <b>${escapeHtml(product.name)} · inventory</b>\n\nNo available items. Add authorized stock to make this product purchasable.`;
+  await editOrReply(ctx, text, keyboard, deps.logger);
+}
+
+export async function showInventoryItemPeek(
+  ctx: BotContext,
+  deps: BotDependencies,
+  itemId: string,
+): Promise<void> {
+  const item = await getAvailableInventoryItem(deps.database.prisma, itemId);
+  const keyboard = new InlineKeyboard()
+    .text("🗑 REMOVE THIS ITEM", `admin:stock:remove:${item.id}`)
+    .row()
+    .text("◀ BACK TO STOCK LIST", `admin:stock:list:${item.productId}:0`);
+  const text = `👁 <b>${smallCaps("Stock item inspector")}</b>\n\n` +
+    `<b>Product:</b> ${escapeHtml(item.product.emoji)} ${escapeHtml(item.product.name)}\n` +
+    `<b>Item ID:</b> <code>${escapeHtml(item.id.slice(0, 8))}</code>\n` +
+    `<b>Added:</b> ${escapeHtml(formatDate(item.createdAt))}\n\n` +
+    `<b>Parsed buyer preview:</b>\n${renderParsedPayloadBlock(item.payload)}`;
+  await editOrReply(ctx, text, keyboard, deps.logger);
+}
+
+export async function showWarrantyClaimsAdmin(
+  ctx: BotContext,
+  deps: BotDependencies,
+  page: number,
+): Promise<void> {
+  const result = await listWarrantyClaims(deps.database.prisma, page, PAGE_SIZE);
+  const keyboard = new InlineKeyboard();
+  for (const claim of result.claims) {
+    const icon = claim.status === "PENDING" ? "⏳"
+      : claim.status === "REPLACED" ? "🔄"
+      : claim.status === "REFUNDED" ? "💳"
+      : "❌";
+    const buyerLabel = claim.buyer.username ? `@${claim.buyer.username}` : claim.buyer.firstName ?? "Buyer";
+    keyboard.text(
+      `${icon} ${claim.product.name} · ${buyerLabel}`.slice(0, 58),
+      `admin:warranty:view:${claim.id}`,
+    ).row();
+  }
+  if (page > 0) keyboard.text("◀", `admin:warranty:${page - 1}`);
+  keyboard.text(`${page + 1}/${result.pages}`, "noop");
+  if (page + 1 < result.pages) keyboard.text("▶", `admin:warranty:${page + 1}`);
+  keyboard.row().text("◀ ADMIN", "admin:panel");
+
+  const lines = result.claims.map((claim) => {
+    const buyerLabel = claim.buyer.username
+      ? `@${escapeHtml(claim.buyer.username)}`
+      : `ID <code>${claim.buyer.telegramId.toString()}</code>`;
+    return `• <b>[${claim.status}]</b> ${escapeHtml(claim.product.emoji)} ${escapeHtml(claim.product.name)} · ${buyerLabel}\n  Reason: <i>${escapeHtml(claim.reason)}</i>`;
+  });
+
+  await editOrReply(
+    ctx,
+    `🛡 <b>${smallCaps("Warranty & Replacement Claims")}</b>\n\n` +
+      `${result.pendingCount} pending · ${result.total} total\n\n` +
+      `${lines.join("\n\n") || "No warranty claims submitted yet."}`,
+    keyboard,
+    deps.logger,
+  );
+}
+
+export async function showWarrantyClaimDetail(
+  ctx: BotContext,
+  deps: BotDependencies,
+  claimId: string,
+): Promise<void> {
+  const claim = await getWarrantyClaimDetail(deps.database.prisma, claimId);
+  const buyerLabel = claim.buyer.username
+    ? `@${escapeHtml(claim.buyer.username)} (<code>${claim.buyer.telegramId.toString()}</code>)`
+    : `<code>${claim.buyer.telegramId.toString()}</code>`;
+
+  const keyboard = new InlineKeyboard();
+  if (claim.status === "PENDING") {
+    keyboard
+      .text("🔄 AUTO-REPLACE FROM STOCK", `admin:warranty:replace:${claim.id}`)
+      .row()
+      .text("💳 REFUND CREDITS", `admin:warranty:refund:${claim.id}`)
+      .text("❌ REJECT", `admin:warranty:reject:${claim.id}`)
+      .row();
+  }
+  keyboard.text("◀ WARRANTY CLAIMS", "admin:warranty:0");
+
+  const text = `🛡 <b>${smallCaps("Warranty Claim")}</b> · <code>#${escapeHtml(claim.id.slice(0, 8))}</code>\n\n` +
+    `<b>Status:</b> ${claim.status}\n` +
+    `<b>Buyer:</b> ${buyerLabel}\n` +
+    `<b>Product:</b> ${escapeHtml(claim.product.emoji)} ${escapeHtml(claim.product.name)}\n` +
+    `<b>Order ID:</b> <code>#${escapeHtml(claim.purchaseId.slice(0, 8))}</code> (${creditLabel(claim.purchase.amountPaid)})\n` +
+    `<b>Submitted:</b> ${escapeHtml(formatDate(claim.createdAt))}\n` +
+    `<b>Reported issue:</b> ${escapeHtml(claim.reason)}\n` +
+    (claim.resolutionNote ? `<b>Resolution:</b> ${escapeHtml(claim.resolutionNote)}\n` : "") +
+    `\n<b>Current delivered item:</b>\n${renderParsedPayloadBlock(claim.purchase.inventoryItem.payload)}`;
+
   await editOrReply(ctx, text, keyboard, deps.logger);
 }
 

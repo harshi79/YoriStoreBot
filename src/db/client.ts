@@ -123,33 +123,57 @@ export async function ensureDatabaseSchema(
   const existing = await prisma.$queryRaw<Array<{ reg: string | null }>>`
     SELECT to_regclass('public.reset_challenges')::text AS reg
   `;
-  if (existing[0]?.reg) {
+  if (!existing[0]?.reg) {
+    logger.info("Database tables not found; applying initial schema migration");
+    const sql = await readFile(INIT_MIGRATION_PATH, "utf8");
+    const statements = sql
+      .split(";")
+      .map((statement) => statement.trim())
+      .filter((statement) => statement.length > 0);
+
+    for (const statement of statements) {
+      try {
+        await prisma.$executeRawUnsafe(statement);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          message.includes("already exists") ||
+          message.includes("42710") ||
+          message.includes("42P07")
+        ) {
+          continue;
+        }
+        throw error;
+      }
+    }
+    logger.info("Initial database schema migration applied");
     return;
   }
 
-  logger.info("Database tables not found; applying initial schema migration");
-  const sql = await readFile(INIT_MIGRATION_PATH, "utf8");
-  const statements = sql
-    .split(";")
-    .map((statement) => statement.trim())
-    .filter((statement) => statement.length > 0);
-
-  for (const statement of statements) {
+  // Ensure any new v2 columns/tables exist on an already-initialized database
+  const upgradeStatements = [
+    `ALTER TABLE "products" ADD COLUMN IF NOT EXISTS "plan_details" VARCHAR(500) NOT NULL DEFAULT ''`,
+    `ALTER TABLE "products" ADD COLUMN IF NOT EXISTS "delivery_instructions" VARCHAR(2000) NOT NULL DEFAULT ''`,
+    `ALTER TABLE "products" ADD COLUMN IF NOT EXISTS "warranty_hours" INTEGER NOT NULL DEFAULT 24`,
+    `ALTER TABLE "products" ADD COLUMN IF NOT EXISTS "media_file_id" VARCHAR(512)`,
+    `ALTER TABLE "products" ADD COLUMN IF NOT EXISTS "featured" BOOLEAN NOT NULL DEFAULT false`,
+    `ALTER TABLE "products" ADD COLUMN IF NOT EXISTS "is_unlimited" BOOLEAN NOT NULL DEFAULT false`,
+    `DO $$ BEGIN CREATE TYPE "WarrantyClaimStatus" AS ENUM ('PENDING', 'REPLACED', 'REFUNDED', 'REJECTED'); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+    `CREATE TABLE IF NOT EXISTS "stock_subscriptions" ("id" TEXT NOT NULL, "user_id" TEXT NOT NULL, "product_id" TEXT NOT NULL, "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP, CONSTRAINT "stock_subscriptions_pkey" PRIMARY KEY ("id"))`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "stock_subscriptions_user_id_product_id_key" ON "stock_subscriptions"("user_id", "product_id")`,
+    `CREATE INDEX IF NOT EXISTS "stock_subscriptions_product_id_created_at_idx" ON "stock_subscriptions"("product_id", "created_at")`,
+    `CREATE TABLE IF NOT EXISTS "warranty_claims" ("id" TEXT NOT NULL, "purchase_id" TEXT NOT NULL, "buyer_id" TEXT NOT NULL, "product_id" TEXT NOT NULL, "reason" VARCHAR(500) NOT NULL, "status" "WarrantyClaimStatus" NOT NULL DEFAULT 'PENDING', "resolution_note" VARCHAR(500), "replacement_item_id" TEXT, "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP, "resolved_at" TIMESTAMPTZ(6), CONSTRAINT "warranty_claims_pkey" PRIMARY KEY ("id"))`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "warranty_claims_purchase_id_key" ON "warranty_claims"("purchase_id")`,
+    `CREATE INDEX IF NOT EXISTS "warranty_claims_status_created_at_idx" ON "warranty_claims"("status", "created_at")`,
+    `CREATE INDEX IF NOT EXISTS "warranty_claims_buyer_id_created_at_idx" ON "warranty_claims"("buyer_id", "created_at")`,
+  ];
+  for (const statement of upgradeStatements) {
     try {
       await prisma.$executeRawUnsafe(statement);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (
-        message.includes("already exists") ||
-        message.includes("42710") ||
-        message.includes("42P07")
-      ) {
-        continue;
-      }
-      throw error;
+    } catch {
+      // Ignore if already applied
     }
   }
-  logger.info("Initial database schema migration applied");
 }
 
 function createPgPoolHandle(

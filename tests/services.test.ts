@@ -12,11 +12,18 @@ import type { BotContext } from "../src/types/context.js";
 import type { AppLogger } from "../src/utils/logger.js";
 import { touchUser } from "../src/services/users.service.js";
 import {
-  addInventoryItems, archiveCategory, archiveProduct, countAvailableInventory, createCategory, createProduct,
-  listAvailableInventory, listCategoryProducts, listEnabledCategories, removeInventoryItem,
-  reorderCategory, updateCategory, updateProduct,
+  addInventoryItems, applyProductPreset, archiveCategory, archiveProduct, clearAvailableInventory,
+  cloneProduct, consumeStockSubscribers, countAvailableInventory, createCategory, createProduct,
+  getAvailableInventoryItem, isSubscribedToStock, listAllAvailablePayloads,
+  listAvailableInventory, listCategoryProducts, listEnabledCategories, listFeaturedProducts,
+  removeInventoryItem, reorderCategory, searchProducts, toggleStockSubscription,
+  updateCategory, updateProduct,
 } from "../src/services/store.service.js";
-import { purchaseProduct } from "../src/services/purchases.service.js";
+import {
+  getUserPurchaseDetail, listWarrantyClaims, purchaseProduct,
+  resolveWarrantyClaimRefund, resolveWarrantyClaimReplace, submitWarrantyClaim,
+} from "../src/services/purchases.service.js";
+import { buildOrderReceiptText, parseDeliveryPayload } from "../src/utils/credential-parser.js";
 import { claimDailyBonus } from "../src/services/bonus.service.js";
 import { createRedeemCodes, redeemCode } from "../src/services/codes.service.js";
 import { changeCredits, giftAllActiveUsers, giftCredits, MAX_CREDITS, removeCredits } from "../src/services/credits.service.js";
@@ -177,6 +184,8 @@ afterAll(async () => {
 }, 60_000);
 
 beforeEach(async () => {
+  await prisma.warrantyClaim.deleteMany();
+  await prisma.stockSubscription.deleteMany();
   await prisma.purchase.deleteMany();
   await prisma.codeRedemption.deleteMany();
   await prisma.inventoryItem.deleteMany();
@@ -885,3 +894,195 @@ describe("Telegram message editing", () => {
     expect(expiredContext.reply).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("smart account delivery, presets, order vault, warranty, and restock alerts", () => {
+  it("parses email:pass, pipe-separated Crunchyroll details, colon-extended lines, and keys", () => {
+    const simple = parseDeliveryPayload("animefan@mail.com:Secret123!");
+    expect(simple).toMatchObject({
+      kind: "account",
+      login: "animefan@mail.com",
+      password: "Secret123!",
+      extraFields: [],
+    });
+
+    const rich = parseDeliveryPayload(
+      "otaku@mail.com:Pass999 | Plan: Mega Fan | Expiry: 2027-01-15 | Region: US | Profile: #2 | PIN: 4321",
+    );
+    expect(rich.kind).toBe("account");
+    expect(rich.login).toBe("otaku@mail.com");
+    expect(rich.password).toBe("Pass999");
+    expect(rich.extraFields).toEqual([
+      { icon: "💎", label: "Plan / Tier", value: "Mega Fan", copyable: false },
+      { icon: "⏳", label: "Validity / Expiry", value: "2027-01-15", copyable: false },
+      { icon: "🌍", label: "Region", value: "US", copyable: false },
+      { icon: "👤", label: "Profile / Screen", value: "#2", copyable: false },
+      { icon: "🔢", label: "PIN", value: "4321", copyable: true },
+    ]);
+
+    const colonRich = parseDeliveryPayload("user@cr.com:Pass123:Mega Fan:30 Days");
+    expect(colonRich.kind).toBe("account");
+    expect(colonRich.extraFields).toHaveLength(2);
+    expect(colonRich.extraFields[0]?.value).toBe("Mega Fan");
+    expect(colonRich.extraFields[1]?.value).toBe("30 Days");
+
+    const key = parseDeliveryPayload("CRUNCHY-XXXX-YYYY-ZZZZ");
+    expect(key.kind).toBe("key");
+  });
+
+  it("delivers Crunchyroll preset details, login rules, and generates a .txt receipt", async () => {
+    const buyer = await makeUser(91_001n, 200);
+    const { product } = await makeProduct("Crunchyroll Mega Fan", 60);
+    await applyProductPreset(prisma, product.id, "crunchyroll");
+    await addInventoryItems(prisma, product.id, [
+      "crunchy@anime.jp:UltraSecret | Plan: Mega Fan | Expiry: 2027-03-01 | Profile: #3 | PIN: 9988",
+    ]);
+
+    const purchase = await purchaseProduct(prisma, buyer.id, product.id, "purchase:crunchyroll-1");
+    expect(purchase.planDetails).toContain("Mega Fan");
+    expect(purchase.deliveryInstructions).toContain("crunchyroll.com");
+    expect(purchase.warrantyHours).toBe(24);
+
+    const html = purchaseDeliveryMessage(purchase);
+    expect(html).toContain("crunchy@anime.jp");
+    expect(html).toContain("UltraSecret");
+    expect(html).toContain("Mega Fan");
+    expect(html).toContain("2027-03-01");
+    expect(html).toContain("9988");
+    expect(html).toContain("crunchyroll.com");
+
+    const txt = buildOrderReceiptText({
+      purchaseId: purchase.purchaseId,
+      productName: purchase.productName,
+      paid: purchase.paid,
+      createdAt: new Date("2026-09-30T00:00:00Z"),
+      payload: purchase.payload,
+      planDetails: purchase.planDetails,
+      deliveryInstructions: purchase.deliveryInstructions,
+      warrantyHours: purchase.warrantyHours,
+    });
+    expect(txt).toContain("Login / Email : crunchy@anime.jp");
+    expect(txt).toContain("Password      : UltraSecret");
+    expect(txt).toContain("Plan / Tier   : Mega Fan");
+    expect(txt).toContain("ACCOUNT / PLAN DETAILS");
+    expect(txt).toContain("IMPORTANT RULES & LOGIN INSTRUCTIONS");
+  });
+
+  it("supports cloning products, searching catalog, featured items, peeking stock, and bulk clearing", async () => {
+    const { product } = await makeProduct("Crunchyroll 1 Month", 45);
+    await applyProductPreset(prisma, product.id, "crunchyroll");
+    await updateProduct(prisma, product.id, { featured: true });
+    await addInventoryItems(prisma, product.id, ["acc1@cr.com:pass1", "acc2@cr.com:pass2"]);
+
+    const featured = await listFeaturedProducts(prisma);
+    expect(featured.total).toBe(1);
+    expect(featured.products[0]?.id).toBe(product.id);
+
+    const search = await searchProducts(prisma, "crunchyroll");
+    expect(search.total).toBe(1);
+    expect(search.products[0]?.name).toBe("Crunchyroll 1 Month");
+
+    const cloned = await cloneProduct(prisma, product.id);
+    expect(cloned.name).toBe("Crunchyroll 1 Month (Copy)");
+    expect(cloned.planDetails).toBe((await prisma.product.findUniqueOrThrow({ where: { id: product.id } })).planDetails);
+    expect(cloned.enabled).toBe(false);
+
+    const list = await listAvailableInventory(prisma, product.id);
+    const peeked = await getAvailableInventoryItem(prisma, list[0]!.id);
+    expect(peeked.payload).toBe("acc1@cr.com:pass1");
+
+    const exported = await listAllAvailablePayloads(prisma, product.id);
+    expect(exported.payloads).toEqual(["acc1@cr.com:pass1", "acc2@cr.com:pass2"]);
+
+    const cleared = await clearAvailableInventory(prisma, product.id);
+    expect(cleared.removed).toBe(2);
+    expect(await countAvailableInventory(prisma, product.id)).toBe(0);
+  });
+
+  it("handles Order Vault inspection and Warranty Claims (auto-replace and credit refund)", async () => {
+    const buyer = await makeUser(92_001n, 300);
+    const { product } = await makeProduct("Netflix UHD", 80);
+    await applyProductPreset(prisma, product.id, "streaming");
+    await addInventoryItems(prisma, product.id, [
+      "dead@nf.com:badpass | Profile: #1",
+    ]);
+
+    const firstOrder = await purchaseProduct(prisma, buyer.id, product.id, "purchase:nf-1");
+    expect(firstOrder.payload).toContain("dead@nf.com");
+
+    const detailBefore = await getUserPurchaseDetail(prisma, buyer.id, firstOrder.purchaseId);
+    expect(detailBefore.inventoryItem.payload).toContain("dead@nf.com");
+
+    await addInventoryItems(prisma, product.id, [
+      "fresh@nf.com:goodpass | Profile: #2",
+    ]);
+    const claim = await submitWarrantyClaim(prisma, buyer.id, firstOrder.purchaseId, "Invalid password on login");
+    expect(claim.status).toBe("PENDING");
+    expect((await listWarrantyClaims(prisma)).pendingCount).toBe(1);
+
+    const replaced = await resolveWarrantyClaimReplace(prisma, claim.id);
+    expect(replaced.replacementPayload).toContain("fresh@nf.com");
+
+    const detailAfter = await getUserPurchaseDetail(prisma, buyer.id, firstOrder.purchaseId);
+    expect(detailAfter.inventoryItem.payload).toContain("fresh@nf.com");
+    expect(detailAfter.warrantyClaim?.status).toBe("REPLACED");
+
+    // Second order -> test warranty credit refund
+    await addInventoryItems(prisma, product.id, ["another@nf.com:pass3"]);
+    const secondOrder = await purchaseProduct(prisma, buyer.id, product.id, "purchase:nf-2");
+    const secondClaim = await submitWarrantyClaim(prisma, buyer.id, secondOrder.purchaseId, "Account locked");
+    const refunded = await resolveWarrantyClaimRefund(prisma, secondClaim.id);
+    expect(refunded.refundedCredits).toBe(80);
+    expect(refunded.newBalance).toBe(220);
+    expect(await prisma.creditTransaction.count({ where: { userId: buyer.id, type: "REFUND", amount: 80 } })).toBe(1);
+  });
+
+  it("lets buyers subscribe to restock alerts and auto-notifies them when the owner adds stock", async () => {
+    const subscriber = await makeUser(93_001n, 100);
+    const { product } = await makeProduct("Spotify Premium", 30);
+
+    expect(await isSubscribedToStock(prisma, subscriber.id, product.id)).toBe(false);
+    const subResult = await toggleStockSubscription(prisma, subscriber.id, product.id);
+    expect(subResult.subscribed).toBe(true);
+    expect(await isSubscribedToStock(prisma, subscriber.id, product.id)).toBe(true);
+
+    const { bot, calls } = makeTestBot();
+    await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), `admin:stock:add:${product.id}`));
+    await bot.handleUpdate(privateMessageUpdate(Number(OWNER_ID), "spot@music.com:pass123 | Plan: Individual"));
+
+    const restockAlert = calls.find(
+      (call) => call.method === "sendMessage" && Number(call.payload.chat_id) === Number(subscriber.telegramId),
+    );
+    expect(restockAlert).toBeDefined();
+    expect(String(restockAlert?.payload.text)).toContain("Spotify Premium");
+    expect(await isSubscribedToStock(prisma, subscriber.id, product.id)).toBe(false);
+    expect(await consumeStockSubscribers(prisma, product.id)).toHaveLength(0);
+  });
+
+  it("supports multi-quantity bulk purchases and unlimited reusable digital products", async () => {
+    const buyer = await makeUser(94_001n, 500);
+    const { product: bulkProduct } = await makeProduct("Crunchyroll Bulk", 40);
+    await addInventoryItems(prisma, bulkProduct.id, [
+      "cr1@mail.com:pass1",
+      "cr2@mail.com:pass2",
+      "cr3@mail.com:pass3",
+    ]);
+
+    const bulkOrder = await purchaseProduct(prisma, buyer.id, bulkProduct.id, "purchase:bulk-3", 40, 3);
+    expect(bulkOrder.quantity).toBe(3);
+    expect(bulkOrder.paid).toBe(120);
+    expect(bulkOrder.remainingCredits).toBe(380);
+    expect(new Set(bulkOrder.payloads)).toEqual(new Set(["cr1@mail.com:pass1", "cr2@mail.com:pass2", "cr3@mail.com:pass3"]));
+    expect(await countAvailableInventory(prisma, bulkProduct.id)).toBe(0);
+
+    const { product: unlimitedProduct } = await makeProduct("Private Guide / Link", 25);
+    await updateProduct(prisma, unlimitedProduct.id, { isUnlimited: true });
+    await addInventoryItems(prisma, unlimitedProduct.id, ["https://example.com/private-guide"]);
+
+    const firstUnlimited = await purchaseProduct(prisma, buyer.id, unlimitedProduct.id, "purchase:unlim-1", 25, 1);
+    const secondUnlimited = await purchaseProduct(prisma, buyer.id, unlimitedProduct.id, "purchase:unlim-2", 25, 1);
+    expect(firstUnlimited.payload).toBe("https://example.com/private-guide");
+    expect(secondUnlimited.payload).toBe("https://example.com/private-guide");
+    expect(await countAvailableInventory(prisma, unlimitedProduct.id)).toBe(1);
+  });
+});
+

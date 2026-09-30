@@ -5,12 +5,94 @@ import type { AdminFlow } from "../types/session.js";
 import type { BotDependencies } from "../bot/dependencies.js";
 import { isOwner, requirePrivate } from "../bot/authorization.js";
 import { categoryDetailKeyboard, productDetailKeyboard } from "../keyboards/inline.js";
-import { getProduct, createCategory, createProduct, updateCategory, updateProduct, addInventoryItems } from "../services/store.service.js";
+import {
+  addInventoryItems,
+  consumeStockSubscribers,
+  createCategory,
+  createProduct,
+  getProduct,
+  updateCategory,
+  updateProduct,
+} from "../services/store.service.js";
+import { submitWarrantyClaim } from "../services/purchases.service.js";
+import { findUserByTelegramId } from "../services/users.service.js";
 import { updateBonusSettings } from "../services/settings.service.js";
 import { showProductAdmin } from "../bot/admin-views.js";
-import { escapeHtml, smallCaps } from "../utils/format.js";
+import { showOrderDetail, showStoreSearchResults } from "../bot/views.js";
+import { creditLabel, escapeHtml, smallCaps } from "../utils/format.js";
 import { DomainError, ValidationError } from "../utils/errors.js";
 import { editOrReply, isUnchangedEdit } from "../bot/render.js";
+
+export async function notifyRestockSubscribers(
+  ctx: BotContext,
+  deps: BotDependencies,
+  productId: string,
+): Promise<number> {
+  const product = await getProduct(deps.database.prisma, productId);
+  if (!product.enabled || product._count.inventory <= 0) return 0;
+  const subscribers = await consumeStockSubscribers(deps.database.prisma, productId);
+  if (!subscribers.length) return 0;
+
+  let notified = 0;
+  const alertText = `🔔 <b>${smallCaps("Restock alert")}</b>\n\n` +
+    `${escapeHtml(product.emoji)} <b>${escapeHtml(product.name)}</b> is back in stock!\n` +
+    (product.planDetails ? `💎 ${escapeHtml(product.planDetails)}\n` : "") +
+    `💳 ${smallCaps("Price")}: ${creditLabel(product.price)}\n` +
+    `📦 ${smallCaps("Available")}: ${product._count.inventory}`;
+  const keyboard = new InlineKeyboard()
+    .text("🛍 VIEW PRODUCT", `store:product:${product.id}`)
+    .text("🏠 HOME", "nav:home");
+
+  for (const subscriber of subscribers) {
+    try {
+      await ctx.api.sendMessage(Number(subscriber.telegramId), alertText, {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
+      notified++;
+    } catch (error) {
+      deps.logger.debug({ err: error, telegramId: subscriber.telegramId.toString() }, "Could not deliver restock alert");
+    }
+  }
+  return notified;
+}
+
+export async function handleUserWarrantySubmission(
+  ctx: BotContext,
+  deps: BotDependencies,
+  purchaseId: string,
+  reason: string,
+): Promise<void> {
+  const user = await findUserByTelegramId(deps.database.prisma, ctx.from!.id);
+  const claim = await submitWarrantyClaim(deps.database.prisma, user.id, purchaseId, reason);
+  ctx.session.userFlow = null;
+
+  const ownerKeyboard = new InlineKeyboard()
+    .text("🔄 AUTO-REPLACE FROM STOCK", `admin:warranty:replace:${claim.id}`)
+    .row()
+    .text("💳 REFUND CREDITS", `admin:warranty:refund:${claim.id}`)
+    .text("❌ REJECT", `admin:warranty:reject:${claim.id}`)
+    .row()
+    .text("🛡 VIEW CLAIM", `admin:warranty:view:${claim.id}`);
+
+  const buyerLabel = claim.buyer.username
+    ? `@${escapeHtml(claim.buyer.username)} (<code>${claim.buyer.telegramId.toString()}</code>)`
+    : `<code>${claim.buyer.telegramId.toString()}</code>`;
+
+  await ctx.api.sendMessage(
+    Number(deps.config.ownerId),
+    `🛡 <b>${smallCaps("New warranty claim")}</b>\n\n` +
+      `<b>Product:</b> ${escapeHtml(claim.product.emoji)} ${escapeHtml(claim.product.name)}\n` +
+      `<b>Buyer:</b> ${buyerLabel}\n` +
+      `<b>Order:</b> <code>#${escapeHtml(claim.purchaseId.slice(0, 8))}</code> (${creditLabel(claim.purchase.amountPaid)})\n` +
+      `<b>Reason:</b> ${escapeHtml(claim.reason)}`,
+    { parse_mode: "HTML", reply_markup: ownerKeyboard },
+  ).catch((error: unknown) => {
+    deps.logger.warn({ err: error }, "Could not send warranty claim alert to owner");
+  });
+
+  await showOrderDetail(ctx, deps, purchaseId);
+}
 
 export async function beginAdminFlow(
   ctx: BotContext,
@@ -57,7 +139,9 @@ async function showFlowPanel(ctx: BotContext, deps: BotDependencies, text: strin
 function allowsSkip(flow: AdminFlow): boolean {
   return flow.kind === "category:edit:description" ||
     flow.kind === "product:create:description" || flow.kind === "product:create:emoji" ||
-    flow.kind === "product:edit:description" || flow.kind === "product:edit:emoji";
+    flow.kind === "product:edit:description" || flow.kind === "product:edit:emoji" ||
+    flow.kind === "product:edit:planDetails" || flow.kind === "product:edit:instructions" ||
+    flow.kind === "product:edit:media";
 }
 
 function parseWholeNumber(raw: string, label: string, min = 0, max = 1_000_000_000): number {
@@ -86,8 +170,51 @@ async function completeOrShowError(
 }
 
 export function registerAdminFlow(bot: Bot<BotContext>, deps: BotDependencies): void {
-  bot.on("message:text", async (ctx, next) => {
+  bot.on("message:photo", async (ctx, next) => {
     const flow = ctx.session.adminFlow;
+    if (!flow || flow.kind !== "product:edit:media") return next();
+    if (!(await requirePrivate(ctx))) return;
+    if (!isOwner(ctx, deps.config)) {
+      ctx.session.adminFlow = null;
+      await ctx.reply("⛔ This owner workflow is private.");
+      return;
+    }
+    const largestPhoto = ctx.message.photo.at(-1);
+    if (!largestPhoto) {
+      await ctx.reply("⚠️ Could not read that photo. Please try again.");
+      return;
+    }
+    await updateProduct(deps.database.prisma, flow.productId, { mediaFileId: largestPhoto.file_id });
+    ctx.session.adminFlow = null;
+    await showProductAdmin(ctx, deps, flow.productId);
+  });
+
+  bot.on("message:text", async (ctx, next) => {
+    const userFlow = ctx.session.userFlow;
+    const flow = ctx.session.adminFlow;
+    if (!flow && userFlow) {
+      if (!(await requirePrivate(ctx))) return;
+      const text = ctx.message.text.trim();
+      if (text.startsWith("/")) return next();
+      try {
+        if (userFlow.kind === "store:search") {
+          ctx.session.userFlow = null;
+          await showStoreSearchResults(ctx, deps, text);
+          return;
+        }
+        if (userFlow.kind === "warranty:reason") {
+          await handleUserWarrantySubmission(ctx, deps, userFlow.purchaseId, text);
+          return;
+        }
+      } catch (error) {
+        if (error instanceof DomainError || error instanceof ValidationError) {
+          await ctx.reply(`⚠️ ${escapeHtml(error.message)}`, { parse_mode: "HTML" });
+          return;
+        }
+        throw error;
+      }
+    }
+
     if (!flow) return next();
     if (!(await requirePrivate(ctx))) return;
     if (!isOwner(ctx, deps.config)) {
@@ -181,6 +308,34 @@ export function registerAdminFlow(bot: Bot<BotContext>, deps: BotDependencies): 
           await showProductAdmin(ctx, deps, flow.productId);
           break;
         }
+        case "product:edit:planDetails": {
+          await updateProduct(deps.database.prisma, flow.productId, { planDetails: text === "/skip" ? "" : text });
+          ctx.session.adminFlow = null;
+          await showProductAdmin(ctx, deps, flow.productId);
+          break;
+        }
+        case "product:edit:instructions": {
+          await updateProduct(deps.database.prisma, flow.productId, { deliveryInstructions: text === "/skip" ? "" : text });
+          ctx.session.adminFlow = null;
+          await showProductAdmin(ctx, deps, flow.productId);
+          break;
+        }
+        case "product:edit:warranty": {
+          await updateProduct(deps.database.prisma, flow.productId, { warrantyHours: parseWholeNumber(text, "Warranty hours", 0, 8_760) });
+          ctx.session.adminFlow = null;
+          await showProductAdmin(ctx, deps, flow.productId);
+          break;
+        }
+        case "product:edit:media": {
+          if (text === "/skip") {
+            await updateProduct(deps.database.prisma, flow.productId, { mediaFileId: null });
+            ctx.session.adminFlow = null;
+            await showProductAdmin(ctx, deps, flow.productId);
+          } else {
+            throw new ValidationError("Please upload a photo, or send /skip to clear the banner photo.");
+          }
+          break;
+        }
         case "product:edit:price": {
           await updateProduct(deps.database.prisma, flow.productId, { price: parseWholeNumber(text, "Price") });
           ctx.session.adminFlow = null;
@@ -197,12 +352,21 @@ export function registerAdminFlow(bot: Bot<BotContext>, deps: BotDependencies): 
           const payloads = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
           const result = await addInventoryItems(deps.database.prisma, flow.productId, payloads);
           ctx.session.adminFlow = null;
+          const notified = result.inserted > 0
+            ? await notifyRestockSubscribers(ctx, deps, flow.productId)
+            : 0;
           const product = await getProduct(deps.database.prisma, flow.productId);
+          const keyboard = productDetailKeyboard(product);
+          if (result.inserted > 0) {
+            keyboard.row().text("📢 ANNOUNCE RESTOCK TO ALL", `admin:stock:announce:${product.id}`);
+          }
           await showFlowPanel(
             ctx,
             deps,
-            `✅ Imported <b>${result.inserted}</b> item(s) for ${escapeHtml(product.emoji)} <b>${escapeHtml(product.name)}</b>. Duplicate lines skipped: ${result.duplicates}.\n\n${smallCaps("Inventory values are stored privately and delivered only after purchase.")}`,
-            productDetailKeyboard(product),
+            `✅ Imported <b>${result.inserted}</b> item(s) for ${escapeHtml(product.emoji)} <b>${escapeHtml(product.name)}</b>. Duplicate lines skipped: ${result.duplicates}.` +
+              (notified > 0 ? `\n🔔 Auto-notified <b>${notified}</b> waiting subscriber(s)!` : "") +
+              `\n\n${smallCaps("Inventory values are stored privately and delivered with parsed account details after purchase.")}`,
+            keyboard,
           );
           break;
         }
@@ -279,8 +443,14 @@ export function registerAdminFlow(bot: Bot<BotContext>, deps: BotDependencies): 
       const payloads = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
       const result = await addInventoryItems(deps.database.prisma, flow.productId, payloads);
       ctx.session.adminFlow = null;
+      const notified = result.inserted > 0
+        ? await notifyRestockSubscribers(ctx, deps, flow.productId)
+        : 0;
       await showProductAdmin(ctx, deps, flow.productId);
-      await ctx.reply(`✅ Imported ${result.inserted} item(s). Duplicate lines skipped: ${result.duplicates}.`);
+      await ctx.reply(
+        `✅ Imported ${result.inserted} item(s). Duplicate lines skipped: ${result.duplicates}.` +
+          (notified > 0 ? ` 🔔 Auto-notified ${notified} waiting subscriber(s)!` : ""),
+      );
     } catch (error) {
       const detail = error instanceof Error
         ? error.message.replaceAll(deps.config.botToken, "[REDACTED]")

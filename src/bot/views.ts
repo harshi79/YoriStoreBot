@@ -2,20 +2,45 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { InlineKeyboard, InputFile } from "grammy";
 import type { InputMediaPhoto } from "grammy/types";
-import { listUserPurchases } from "../services/purchases.service.js";
+import {
+  getUserPurchaseDetail,
+  listUserPurchases,
+} from "../services/purchases.service.js";
 import { getBonusSettings } from "../services/settings.service.js";
 import {
   getProduct,
+  isSubscribedToStock,
   listCategoryProducts,
   listEnabledCategories,
+  listFeaturedProducts,
+  searchProducts,
 } from "../services/store.service.js";
 import { countUserPurchases, findUserByTelegramId, saveProfilePhoto } from "../services/users.service.js";
-import { helpMessage, productMessage, profileMessage, welcomeMessage } from "../messages/iris.js";
-import { categoriesKeyboard, mainKeyboard, profileKeyboard, storeCategoryProductsKeyboard } from "../keyboards/inline.js";
+import {
+  helpMessage,
+  productMessage,
+  profileMessage,
+  renderParsedPayloadBlock,
+  welcomeMessage,
+} from "../messages/iris.js";
+import {
+  categoriesKeyboard,
+  mainKeyboard,
+  profileKeyboard,
+  storeCategoryProductsKeyboard,
+} from "../keyboards/inline.js";
 import { editOrReply, isUnchangedEdit } from "./render.js";
 import type { BotContext } from "../types/context.js";
 import type { BotDependencies } from "./dependencies.js";
-import { creditLabel, escapeHtml, formatDate, formatDuration, smallCaps } from "../utils/format.js";
+import {
+  creditLabel,
+  escapeFilenamePart,
+  escapeHtml,
+  formatDate,
+  formatDuration,
+  smallCaps,
+} from "../utils/format.js";
+import { buildOrderReceiptText } from "../utils/credential-parser.js";
 import { BonusUnavailableError, DomainError } from "../utils/errors.js";
 import { claimDailyBonus, getBonusStatus } from "../services/bonus.service.js";
 
@@ -49,7 +74,10 @@ export async function sendWelcomeVideo(ctx: BotContext, deps: BotDependencies): 
 }
 
 export async function showStore(ctx: BotContext, deps: BotDependencies): Promise<void> {
-  const categories = await listEnabledCategories(deps.database.prisma);
+  const [categories, featured] = await Promise.all([
+    listEnabledCategories(deps.database.prisma),
+    listFeaturedProducts(deps.database.prisma, 0, 1),
+  ]);
   if (!categories.length) {
     await editOrReply(
       ctx,
@@ -61,10 +89,58 @@ export async function showStore(ctx: BotContext, deps: BotDependencies): Promise
   }
   await editOrReply(
     ctx,
-    `🛍 <b>${smallCaps("Iris store")}</b>\n\n${smallCaps("Choose a category to explore.")}`,
-    categoriesKeyboard(categories),
+    `🛍 <b>${smallCaps("Iris store")}</b>\n\n${smallCaps("Choose a category, browse featured items, or search the catalog.")}`,
+    categoriesKeyboard(categories, featured.total),
     deps.logger,
   );
+}
+
+export async function showFeaturedStore(
+  ctx: BotContext,
+  deps: BotDependencies,
+  page = 0,
+): Promise<void> {
+  const result = await listFeaturedProducts(deps.database.prisma, page, PAGE_SIZE);
+  const keyboard = new InlineKeyboard();
+  for (const product of result.products) {
+    const status = product._count.inventory > 0 ? "" : " · OUT OF STOCK";
+    keyboard.text(
+      `🔥 ${product.emoji} ${product.name} · ${product.price} credits${status}`.slice(0, 58),
+      `store:product:${product.id}`,
+    ).row();
+  }
+  if (page > 0) keyboard.text("◀", `store:featured:${page - 1}`);
+  keyboard.text(`${page + 1}/${result.pages}`, "noop");
+  if (page + 1 < result.pages) keyboard.text("▶", `store:featured:${page + 1}`);
+  keyboard.row().text("◀ STORE", "nav:store").text("🏠 HOME", "nav:home");
+
+  const text = result.products.length
+    ? `🔥 <b>${smallCaps("Featured products")}</b>\n\n${smallCaps("Hand-picked popular items in the store.")}`
+    : `🔥 <b>${smallCaps("Featured products")}</b>\n\n${smallCaps("No featured items right now.")}`;
+  await editOrReply(ctx, text, keyboard, deps.logger);
+}
+
+export async function showStoreSearchResults(
+  ctx: BotContext,
+  deps: BotDependencies,
+  query: string,
+): Promise<void> {
+  const result = await searchProducts(deps.database.prisma, query, 0, PAGE_SIZE);
+  const keyboard = new InlineKeyboard();
+  for (const product of result.products) {
+    const status = product._count.inventory > 0 ? "" : " · OUT OF STOCK";
+    const badge = product.featured ? "🔥 " : "";
+    keyboard.text(
+      `${badge}${product.emoji} ${product.name} · ${product.price} credits${status}`.slice(0, 58),
+      `store:product:${product.id}`,
+    ).row();
+  }
+  keyboard.text("🔍 NEW SEARCH", "store:search:start").text("◀ STORE", "nav:store").row().text("🏠 HOME", "nav:home");
+
+  const text = result.products.length
+    ? `🔍 <b>${smallCaps("Search results for")} "${escapeHtml(query)}"</b>\n\nFound ${result.total} matching product(s).`
+    : `🔍 <b>${smallCaps("No results for")} "${escapeHtml(query)}"</b>\n\n${smallCaps("Try another keyword or browse the store categories.")}`;
+  await editOrReply(ctx, text, keyboard, deps.logger);
 }
 
 export async function showCategory(
@@ -98,8 +174,19 @@ export async function showProduct(ctx: BotContext, deps: BotDependencies, produc
   const canBuy = product.enabled && product.deletedAt === null && product.category.enabled &&
     product.category.deletedAt === null && product._count.inventory > 0;
   const keyboard = new InlineKeyboard();
-  if (canBuy) keyboard.text("🛒 BUY", `buy:start:${product.id}`).row();
-  else keyboard.text("⚠️ OUT OF STOCK", "noop").row();
+  if (canBuy) {
+    keyboard.text("🛒 BUY", `buy:start:${product.id}`).row();
+  } else {
+    const subscribed = await isSubscribedToStock(deps.database.prisma, currentUser.id, product.id);
+    keyboard.text("⚠️ OUT OF STOCK", "noop").row();
+    keyboard.text(
+      subscribed ? "🔕 UNSUBSCRIBE RESTOCK ALERT" : "🔔 NOTIFY WHEN RESTOCKED",
+      `store:notify:${product.id}`,
+    ).row();
+  }
+  if (product.mediaFileId) {
+    keyboard.text("🖼 VIEW BANNER", `store:banner:${product.id}`).row();
+  }
   keyboard.text("◀ BACK", `store:category:${product.categoryId}:0`).text("🏠 HOME", "nav:home");
   await editOrReply(
     ctx,
@@ -108,6 +195,9 @@ export async function showProduct(ctx: BotContext, deps: BotDependencies, produc
       name: product.name,
       category: product.category.name,
       description: product.description,
+      planDetails: product.planDetails,
+      warrantyHours: product.warrantyHours,
+      featured: product.featured,
       price: product.price,
       stock: product._count.inventory,
       credits: currentUser.credits,
@@ -236,9 +326,12 @@ export async function claimBonus(ctx: BotContext, deps: BotDependencies, edit = 
   }
 }
 
-export async function showOrders(ctx: BotContext, deps: BotDependencies): Promise<void> {
+export async function showOrders(ctx: BotContext, deps: BotDependencies, page = 0): Promise<void> {
   const user = await findUserByTelegramId(deps.database.prisma, ctx.from!.id);
-  const purchases = await listUserPurchases(deps.database.prisma, user.id, 0, 10);
+  const [purchases, total] = await Promise.all([
+    listUserPurchases(deps.database.prisma, user.id, Math.max(0, page) * PAGE_SIZE, PAGE_SIZE),
+    deps.database.prisma.purchase.count({ where: { buyerId: user.id } }),
+  ]);
   if (!purchases.length) {
     await editOrReply(
       ctx,
@@ -248,15 +341,149 @@ export async function showOrders(ctx: BotContext, deps: BotDependencies): Promis
     );
     return;
   }
+
+  const keyboard = new InlineKeyboard();
+  for (const purchase of purchases) {
+    const claimBadge = purchase.warrantyClaim
+      ? purchase.warrantyClaim.status === "PENDING" ? " · ⏳"
+        : purchase.warrantyClaim.status === "REPLACED" ? " · 🔄"
+        : purchase.warrantyClaim.status === "REFUNDED" ? " · 💳"
+        : ""
+      : "";
+    keyboard.text(
+      `${purchase.product.emoji} ${purchase.product.name} · #${purchase.id.slice(0, 6)}${claimBadge}`.slice(0, 58),
+      `order:view:${purchase.id}`,
+    ).row();
+  }
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  if (pages > 1) {
+    if (page > 0) keyboard.text("◀", `orders:page:${page - 1}`);
+    keyboard.text(`${page + 1}/${pages}`, "noop");
+    if (page + 1 < pages) keyboard.text("▶", `orders:page:${page + 1}`);
+    keyboard.row();
+  }
+  keyboard.text("🛍 STORE", "nav:store").text("🏠 HOME", "nav:home");
+
   const lines = purchases.map((purchase) =>
-    `• ${escapeHtml(purchase.product.emoji)} ${escapeHtml(purchase.product.name)} — ${creditLabel(purchase.amountPaid)}\n  ${escapeHtml(formatDate(purchase.createdAt))}`,
+    `• ${escapeHtml(purchase.product.emoji)} <b>${escapeHtml(purchase.product.name)}</b> — ${creditLabel(purchase.amountPaid)}\n  <code>#${escapeHtml(purchase.id.slice(0, 8))}</code> · ${escapeHtml(formatDate(purchase.createdAt))}`,
   );
   await editOrReply(
     ctx,
-    `📦 <b>${smallCaps("Your purchases")}</b>\n\n${lines.join("\n\n")}`,
-    mainKeyboard(),
+    `📦 <b>${smallCaps("Your Order Vault")}</b> · ${total}\n\n${smallCaps("Tap any order below to view credentials, account details, download a .txt receipt, or claim warranty.")}\n\n${lines.join("\n\n")}`,
+    keyboard,
     deps.logger,
   );
+}
+
+export async function showOrderDetail(
+  ctx: BotContext,
+  deps: BotDependencies,
+  purchaseId: string,
+): Promise<void> {
+  const user = await findUserByTelegramId(deps.database.prisma, ctx.from!.id);
+  const purchase = await getUserPurchaseDetail(deps.database.prisma, user.id, purchaseId);
+
+  const warrantyExpiresAt = purchase.createdAt.getTime() + purchase.product.warrantyHours * 3_600_000;
+  const warrantyRemainingMs = warrantyExpiresAt - Date.now();
+  const warrantyActive = purchase.product.warrantyHours > 0 && warrantyRemainingMs > 0;
+
+  let warrantyStatusLine = `🛡 <b>${smallCaps("Warranty")}:</b> None`;
+  if (purchase.warrantyClaim) {
+    const statusMap: Record<string, string> = {
+      PENDING: "⏳ Claim pending owner review",
+      REPLACED: "✅ Replaced with fresh stock",
+      REFUNDED: "💳 Credits refunded",
+      REJECTED: "❌ Claim declined",
+    };
+    warrantyStatusLine = `🛡 <b>${smallCaps("Warranty")}:</b> ${statusMap[purchase.warrantyClaim.status] ?? purchase.warrantyClaim.status}` +
+      (purchase.warrantyClaim.resolutionNote ? ` (${escapeHtml(purchase.warrantyClaim.resolutionNote)})` : "");
+  } else if (purchase.product.warrantyHours > 0) {
+    warrantyStatusLine = warrantyActive
+      ? `🛡 <b>${smallCaps("Warranty")}:</b> Active (${formatDuration(warrantyRemainingMs)} remaining)`
+      : `🛡 <b>${smallCaps("Warranty")}:</b> Expired`;
+  }
+
+  const sections: string[] = [
+    `🧾 <b>${smallCaps("Order Receipt")}</b> · <code>#${escapeHtml(purchase.id.slice(0, 8))}</code>\n\n` +
+      `📦 <b>${smallCaps("Product")}:</b> ${escapeHtml(purchase.product.emoji)} ${escapeHtml(purchase.product.name)}\n` +
+      `🗂 <b>${smallCaps("Category")}:</b> ${escapeHtml(purchase.product.category.name)}\n` +
+      `💳 <b>${smallCaps("Paid")}:</b> ${creditLabel(purchase.amountPaid)}\n` +
+      `🗓 <b>${smallCaps("Date")}:</b> ${escapeHtml(formatDate(purchase.createdAt))}\n` +
+      warrantyStatusLine,
+  ];
+
+  if (purchase.product.planDetails.trim()) {
+    sections.push(`💎 <b>${smallCaps("Account / Plan details")}</b>\n${escapeHtml(purchase.product.planDetails.trim())}`);
+  }
+
+  sections.push(
+    `🔐 <b>${smallCaps("Delivered credentials & details")}</b>\n` +
+      renderParsedPayloadBlock(purchase.inventoryItem.payload),
+  );
+
+  if (purchase.product.deliveryInstructions.trim()) {
+    sections.push(
+      `📜 <b>${smallCaps("Login guide & rules")}</b>\n${escapeHtml(purchase.product.deliveryInstructions.trim())}`,
+    );
+  }
+
+  const keyboard = new InlineKeyboard()
+    .text("📄 DOWNLOAD .TXT", `order:txt:${purchase.id}`);
+  if (warrantyActive && !purchase.warrantyClaim) {
+    keyboard.text("🛠 REPORT ISSUE", `order:warranty:${purchase.id}`);
+  }
+  keyboard.row().text("◀ MY ORDERS", "nav:orders").text("🏠 HOME", "nav:home");
+
+  await editOrReply(ctx, sections.join("\n\n"), keyboard, deps.logger);
+}
+
+export async function sendOrderReceiptFile(
+  ctx: BotContext,
+  deps: BotDependencies,
+  purchaseId: string,
+): Promise<void> {
+  const user = await findUserByTelegramId(deps.database.prisma, ctx.from!.id);
+  const purchase = await getUserPurchaseDetail(deps.database.prisma, user.id, purchaseId);
+  const receiptText = buildOrderReceiptText({
+    purchaseId: purchase.id,
+    productName: purchase.product.name,
+    categoryName: purchase.product.category.name,
+    paid: purchase.amountPaid,
+    createdAt: purchase.createdAt,
+    payload: purchase.inventoryItem.payload,
+    planDetails: purchase.product.planDetails,
+    deliveryInstructions: purchase.product.deliveryInstructions,
+    warrantyHours: purchase.product.warrantyHours,
+  });
+  const filename = `iris-receipt-${escapeFilenamePart(purchase.product.name)}-${purchase.id.slice(0, 8)}.txt`;
+  await ctx.replyWithDocument(new InputFile(Buffer.from(receiptText, "utf8"), filename), {
+    caption: `📄 <b>${smallCaps("Order receipt")}</b> · <code>#${escapeHtml(purchase.id.slice(0, 8))}</code>`,
+    parse_mode: "HTML",
+  });
+}
+
+export async function showWarrantyPrompt(
+  ctx: BotContext,
+  deps: BotDependencies,
+  purchaseId: string,
+): Promise<void> {
+  const user = await findUserByTelegramId(deps.database.prisma, ctx.from!.id);
+  const purchase = await getUserPurchaseDetail(deps.database.prisma, user.id, purchaseId);
+  ctx.session.userFlow = { kind: "warranty:reason", purchaseId: purchase.id };
+
+  const keyboard = new InlineKeyboard()
+    .text("❌ Invalid Email / Password", `order:claim:${purchase.id}:invalid_creds`)
+    .row()
+    .text("🔒 Account Locked / 2FA", `order:claim:${purchase.id}:locked`)
+    .row()
+    .text("📉 Plan Expired / Free Tier", `order:claim:${purchase.id}:expired`)
+    .row()
+    .text("◀ BACK TO ORDER", `order:view:${purchase.id}`);
+
+  const text = `🛠 <b>${smallCaps("Report an issue / Claim warranty")}</b>\n\n` +
+    `📦 <b>${escapeHtml(purchase.product.emoji)} ${escapeHtml(purchase.product.name)}</b> (<code>#${escapeHtml(purchase.id.slice(0, 8))}</code>)\n\n` +
+    `${smallCaps("Select a quick reason below, or type a message describing what went wrong with the delivered item.")}`;
+  await editOrReply(ctx, text, keyboard, deps.logger);
 }
 
 export async function showHelp(ctx: BotContext, deps: BotDependencies): Promise<void> {

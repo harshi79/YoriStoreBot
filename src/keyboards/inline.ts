@@ -1,5 +1,6 @@
 import { InlineKeyboard } from "grammy";
 import type { Category, Product, RedeemCode } from "../generated/prisma/client.js";
+import { PRODUCT_DELIVERY_PRESETS } from "../utils/credential-parser.js";
 
 export function mainKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
@@ -26,15 +27,22 @@ export function backHomeKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text("◀ BACK", "nav:home");
 }
 
-export function categoriesKeyboard(categories: Array<Category & { _count: { products: number } }>): InlineKeyboard {
+export function categoriesKeyboard(
+  categories: Array<Category & { _count: { products: number } }>,
+  featuredCount = 0,
+): InlineKeyboard {
   const keyboard = new InlineKeyboard();
+  if (featuredCount > 0) {
+    keyboard.text(`🔥 FEATURED ITEMS · ${featuredCount}`, "store:featured:0").row();
+  }
   for (const category of categories) {
     keyboard.text(
       `${category.emoji} ${category.name} · ${category._count.products}`,
       `store:category:${category.id}:0`,
     ).row();
   }
-  return keyboard.text("◀ HOME", "nav:home");
+  keyboard.text("🔍 SEARCH", "store:search:start").text("◀ HOME", "nav:home");
+  return keyboard;
 }
 
 export function storeCategoryProductsKeyboard(
@@ -46,8 +54,9 @@ export function storeCategoryProductsKeyboard(
   const keyboard = new InlineKeyboard();
   for (const product of products) {
     const status = product._count.inventory > 0 ? "" : " · OUT OF STOCK";
+    const badge = product.featured ? "🔥 " : "";
     keyboard.text(
-      `${product.emoji} ${product.name} · ${product.price} credits${status}`.slice(0, 58),
+      `${badge}${product.emoji} ${product.name} · ${product.price} credits${status}`.slice(0, 58),
       `store:product:${product.id}`,
     ).row();
   }
@@ -68,9 +77,10 @@ export function productListKeyboard(
   const keyboard = new InlineKeyboard();
   for (const product of products) {
     const status = product.enabled && product._count.inventory > 0 ? "" : " · OUT";
+    const badge = product.featured ? "🔥 " : "";
     const prefix = namespace === "store" ? "store:product:" : "admin:product:view:";
     keyboard.text(
-      `${product.emoji} ${product.name} · ${product.price}c${status}`.slice(0, 58),
+      `${badge}${product.emoji} ${product.name} · ${product.price}c${status}`.slice(0, 58),
       `${prefix}${product.id}`,
     ).row();
   }
@@ -107,17 +117,42 @@ export function productDetailKeyboard(product: Product & { category: Category; _
     .text("✏️ NAME", `admin:product:edit:name:${product.id}`)
     .text("📝 DESCRIPTION", `admin:product:edit:description:${product.id}`)
     .row()
+    .text("💎 PLAN SPECS", `admin:product:edit:plan:${product.id}`)
+    .text("📜 LOGIN GUIDE", `admin:product:edit:instructions:${product.id}`)
+    .row()
+    .text("⚡ PRESETS", `admin:product:presets:${product.id}`)
+    .text(`🛡 WARRANTY (${product.warrantyHours}h)`, `admin:product:edit:warranty:${product.id}`)
+    .row()
     .text("💳 PRICE", `admin:product:edit:price:${product.id}`)
     .text("🎨 ICON", `admin:product:edit:emoji:${product.id}`)
     .row()
+    .text("🖼 BANNER", `admin:product:edit:media:${product.id}`)
+    .text(product.featured ? "🔥 UNFEATURE" : "🔥 FEATURE", `admin:product:featured:${product.id}`)
+    .row()
+    .text(product.isUnlimited ? "♾ UNLIMITED: ON" : "♾ UNLIMITED: OFF", `admin:product:unlimited:${product.id}`)
     .text("🗂 CATEGORY", `admin:product:category:${product.id}`)
+    .row()
     .text(product.enabled ? "⏸ DISABLE" : "▶ ENABLE", `admin:product:toggle:${product.id}`)
+    .text("🧬 CLONE", `admin:product:clone:${product.id}`)
     .row()
     .text("📥 ADD STOCK", `admin:stock:add:${product.id}`)
     .text("📋 VIEW STOCK", `admin:stock:list:${product.id}:0`)
     .row()
     .text("🗑 DELETE", `admin:product:delete:${product.id}`)
     .text("◀ PRODUCTS", "admin:products:0");
+}
+
+export function productPresetsKeyboard(productId: string): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const preset of Object.values(PRODUCT_DELIVERY_PRESETS)) {
+    keyboard.text(preset.buttonLabel, `admin:product:preset:${productId}:${preset.id}`).row();
+  }
+  keyboard
+    .text("💎 EDIT PLAN SPECS", `admin:product:edit:plan:${productId}`)
+    .text("📜 EDIT GUIDE", `admin:product:edit:instructions:${productId}`)
+    .row()
+    .text("◀ PRODUCT", `admin:product:view:${productId}`);
+  return keyboard;
 }
 
 export function adminPanelKeyboard(): InlineKeyboard {
@@ -131,16 +166,18 @@ export function adminPanelKeyboard(): InlineKeyboard {
     .text("🎁 Credits", "admin:credits")
     .text("🔑 Redeem codes", "admin:codes:0")
     .row()
+    .text("🧾 Purchases", "admin:purchases:0")
+    .text("🛡 Warranty Claims", "admin:warranty:0")
+    .row()
     .text("📢 Broadcast", "admin:broadcast")
     .text("📊 Statistics", "admin:stats")
     .row()
     .text("📤 Export", "admin:export")
     .text("⚙️ Settings", "admin:settings")
     .row()
-    .text("🧾 Purchases", "admin:purchases:0")
     .text("🔄 Restart", "admin:restart")
-    .row()
     .text("⚠️ Reset", "admin:reset")
+    .row()
     .text("🏠 HOME", "nav:home");
 }
 
@@ -167,8 +204,9 @@ export function categoryProductsAdminKeyboard(
 ): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   for (const product of products) {
+    const badge = product.featured ? "🔥 " : "";
     keyboard.text(
-      `${product.emoji} ${product.name} · ${product.price}c · ${product._count.inventory} stock`.slice(0, 58),
+      `${badge}${product.emoji} ${product.name} · ${product.price}c · ${product._count.inventory} stock`.slice(0, 58),
       `admin:product:view:${product.id}`,
     ).row();
   }
@@ -202,9 +240,28 @@ export function inventoryProductsKeyboard(
   return keyboard.text("◀ CATEGORY", `admin:inventory:category:${categoryId}`);
 }
 
-export function confirmPurchaseKeyboard(productId: string, nonce: string, expectedPrice: number): InlineKeyboard {
-  return new InlineKeyboard()
-    .text("🛒 CONFIRM BUY", `buy:confirm:${productId}:${nonce}:${expectedPrice.toString(36)}`)
+export function confirmPurchaseKeyboard(
+  productId: string,
+  nonce: string,
+  expectedPrice: number,
+  quantity = 1,
+  maxAvailable = 1,
+): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  if (maxAvailable >= 2) {
+    for (const qty of [1, 2, 3, 5]) {
+      if (qty <= maxAvailable) {
+        const label = qty === quantity ? `✅ ${qty}x` : `${qty}x`;
+        keyboard.text(label, `buy:qty:${productId}:${qty}`);
+      }
+    }
+    keyboard.row();
+  }
+  return keyboard
+    .text(
+      quantity > 1 ? `🛒 CONFIRM BUY (${quantity}x)` : "🛒 CONFIRM BUY",
+      `buy:confirm:${productId}:${nonce}:${expectedPrice.toString(36)}`,
+    )
     .text("◀ BACK", `store:product:${productId}`);
 }
 

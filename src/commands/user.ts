@@ -17,6 +17,8 @@ import { redeemCode } from "../services/codes.service.js";
 import { findUserByTelegramId } from "../services/users.service.js";
 import { mainKeyboard } from "../keyboards/inline.js";
 import { creditLabel, escapeHtml, smallCaps } from "../utils/format.js";
+import { editOrReplyRich, replyRichOrLegacy } from "../bot/render.js";
+import { richButtonRow, richCallbackButton, richHeading, richKeyValueTable, richParagraph } from "../messages/rich-ui.js";
 import { AlreadyRedeemedError, CodeUnavailableError, DomainError } from "../utils/errors.js";
 
 export function registerUserCommands(bot: Bot<BotContext>, deps: BotDependencies): void {
@@ -39,13 +41,17 @@ export function registerUserCommands(bot: Bot<BotContext>, deps: BotDependencies
     const query = ctx.match.trim();
     if (!query) {
       ctx.session.userFlow = { kind: "store:search" };
-      await ctx.reply(
-        `🔍 <b>${smallCaps("Search Iris store")}</b>\n\nSend a keyword (e.g. <code>crunchyroll</code>, <code>netflix</code>, <code>premium</code>) or use /cancel.`,
-        {
-          parse_mode: "HTML",
-          reply_markup: new InlineKeyboard().text("◀ STORE", "nav:store"),
-        },
-      );
+      const text = `🔍 <b>${smallCaps("Search Iris store")}</b>\n\n${smallCaps("Send a keyword (for example, crunchyroll, netflix, or premium) or use")} <code>/cancel</code>.`;
+      await editOrReplyRich(ctx, {
+        blocks: [
+          richHeading("🔍 Search Iris store", 1),
+          richParagraph("Send a keyword such as crunchyroll, netflix, or premium. Use /cancel to stop.", true),
+          richButtonRow([richCallbackButton("◀ Store", "nav:store", "link")]),
+        ],
+      }, text, {
+        fallbackKeyboard: new InlineKeyboard().text(smallCaps("◀ STORE"), "nav:store"),
+        logger: deps.logger,
+      });
       return;
     }
     ctx.session.userFlow = null;
@@ -74,19 +80,37 @@ export function registerUserCommands(bot: Bot<BotContext>, deps: BotDependencies
     if (!(await requirePrivate(ctx))) return;
     const code = ctx.match.trim();
     if (!code) {
-      await ctx.reply("Use /redeem IRIS-XXXX-XXXX-XXXX", { reply_markup: mainKeyboard() });
+      await replyRichOrLegacy(ctx, {
+        blocks: [
+          richHeading("🎟 Redeem a credit code", 1),
+          richParagraph([smallCaps("Use "), { type: "code", text: "/redeem IRIS-XXXX-XXXX-XXXX" }, smallCaps(" to claim credits.")]),
+        ],
+      }, `${smallCaps("Use")} /redeem IRIS-XXXX-XXXX-XXXX`, { fallbackKeyboard: mainKeyboard(), logger: deps.logger });
       return;
     }
     try {
       const user = await findUserByTelegramId(deps.database.prisma, ctx.from!.id);
       const result = await redeemCode(deps.database.prisma, user.id, code);
-      await ctx.reply(
-        `🎉 <b>Code redeemed</b>\n\n✦ +${creditLabel(result.credits)}\n💰 Balance: ${creditLabel(result.balance)}`,
-        { parse_mode: "HTML", reply_markup: mainKeyboard() },
-      );
+      const text = `🎉 <b>${smallCaps("Code redeemed")}</b>\n\n✦ +${creditLabel(result.credits)}\n💰 ${smallCaps("Balance")}: ${creditLabel(result.balance)}`;
+      await editOrReplyRich(ctx, {
+        blocks: [
+          richHeading("🎉 Code redeemed", 1),
+          richKeyValueTable([
+            ["Credits received", `+${creditLabel(result.credits)}`],
+            ["New balance", creditLabel(result.balance)],
+          ], "Redemption receipt"),
+          richButtonRow([
+            richCallbackButton("🛍 Store", "nav:store", "primary"),
+            richCallbackButton("👤 Profile", "nav:profile"),
+            richCallbackButton("🏠 Home", "nav:home", "link"),
+          ]),
+        ],
+      }, text, { fallbackKeyboard: mainKeyboard(), logger: deps.logger });
     } catch (error) {
       if (error instanceof AlreadyRedeemedError || error instanceof CodeUnavailableError || error instanceof DomainError) {
-        await ctx.reply(`⚠️ ${escapeHtml(error.message)}`, { parse_mode: "HTML", reply_markup: mainKeyboard() });
+        await replyRichOrLegacy(ctx, {
+          blocks: [richHeading("⚠️ Code not redeemed", 1), richParagraph(error.message)],
+        }, `⚠️ ${escapeHtml(error.message)}`, { fallbackKeyboard: mainKeyboard(), logger: deps.logger });
         return;
       }
       throw error;
@@ -110,6 +134,8 @@ export function registerUserCommands(bot: Bot<BotContext>, deps: BotDependencies
     ctx.session.userFlow = null;
     ctx.session.purchaseConfirmation = null;
     if (!(await requirePrivate(ctx))) return;
-    await ctx.reply("Current Iris form cancelled.", { reply_markup: mainKeyboard() });
+    await replyRichOrLegacy(ctx, {
+      blocks: [richHeading("Form cancelled", 1), richParagraph("The current form has been cancelled. Nothing else was changed.", true)],
+    }, smallCaps("Current Iris form cancelled."), { fallbackKeyboard: mainKeyboard(), logger: deps.logger });
   });
 }

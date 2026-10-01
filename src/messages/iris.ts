@@ -1,58 +1,18 @@
 import { creditLabel, escapeHtml, formatDate, safeText, smallCaps } from "../utils/format.js";
 import { parseDeliveryPayload } from "../utils/credential-parser.js";
-import type {
-  InputRichBlock,
-  InputRichBlockTable,
-  InputRichMessage,
-  RichBlockTableCell,
-  RichMessageButton,
-  RichText,
-} from "grammy/types";
+import type { InputRichBlock, InputRichMessage, RichMessageButton, RichText } from "grammy/types";
 import type { PurchaseResult } from "../services/purchases.service.js";
-import { richButtonRow, richCallbackButton } from "./rich-ui.js";
+import {
+  richButtonRow,
+  richCallbackButton,
+  richDataTable as dataTable,
+  richFooter,
+  richHeading,
+  richKeyValueTable as keyValueTable,
+  richParagraph,
+} from "./rich-ui.js";
 
-type CellAlignment = NonNullable<RichBlockTableCell["align"]>;
-
-function tableCell(text: RichText, header = false, align: CellAlignment = "left"): RichBlockTableCell {
-  return {
-    text,
-    ...(header ? { is_header: true as const } : {}),
-    align,
-    valign: "middle",
-  };
-}
-
-function keyValueTable(rows: Array<[string, RichText]>, caption: string): InputRichBlockTable {
-  return {
-    type: "table",
-    caption,
-    is_bordered: true,
-    is_striped: true,
-    is_compact: true,
-    cells: rows.map(([label, value]) => [tableCell(label, true), tableCell(value)]),
-  };
-}
-
-function dataTable(
-  headers: string[],
-  rows: string[][],
-  caption: string,
-  alignments: CellAlignment[] = [],
-): InputRichBlockTable {
-  return {
-    type: "table",
-    caption,
-    is_bordered: true,
-    is_striped: true,
-    is_compact: true,
-    cells: [
-      headers.map((header, index) => tableCell(header, true, alignments[index] ?? "left")),
-      ...rows.map((row) => row.map((value, index) => tableCell(value, false, alignments[index] ?? "left"))),
-    ],
-  };
-}
-
-function richCredentialBlocks(payload: string): InputRichBlock[] {
+export function richCredentialBlocks(payload: string): InputRichBlock[] {
   const parsed = parseDeliveryPayload(payload);
   if (parsed.kind === "account" && parsed.login && parsed.password) {
     const rows: Array<[string, RichText]> = [
@@ -68,7 +28,7 @@ function richCredentialBlocks(payload: string): InputRichBlock[] {
       {
         type: "expandable_blockquote",
         text: payload,
-        credit: "Original delivery line",
+        credit: smallCaps("Original delivery line"),
       },
     ];
   }
@@ -83,7 +43,7 @@ function richCredentialBlocks(payload: string): InputRichBlock[] {
       {
         type: "expandable_blockquote",
         text: payload,
-        credit: "Original delivery line",
+        credit: smallCaps("Original delivery line"),
       },
     ];
   }
@@ -92,7 +52,7 @@ function richCredentialBlocks(payload: string): InputRichBlock[] {
     return [keyValueTable([["🎟 Key / code", { type: "code", text: parsed.rawPayload }]], "Your key")];
   }
 
-  return [{ type: "pre", text: parsed.rawPayload || "No delivery details provided." }];
+  return [{ type: "pre", text: parsed.rawPayload || smallCaps("No delivery details provided.") }];
 }
 
 export function richProductMessage(
@@ -112,13 +72,13 @@ export function richProductMessage(
   actions: RichMessageButton[] = [],
 ): InputRichMessage {
   const stock = product.isUnlimited
-    ? "Unlimited"
-    : product.stock > 0 ? product.stock.toLocaleString("en-US") : "Out of stock";
+    ? smallCaps("Unlimited")
+    : product.stock > 0 ? product.stock.toLocaleString("en-US") : smallCaps("Out of stock");
   const rows: Array<[string, RichText]> = [
     ["Price", creditLabel(product.price)],
     ["Available", stock],
     ["Your balance", creditLabel(product.credits)],
-    ["Refund policy", "No refunds · all sales are final"],
+    ["Refund policy", smallCaps("No refunds · all sales are final")],
   ];
   if (product.planDetails?.trim()) rows.splice(1, 0, ["Plan / specs", product.planDetails.trim()]);
   if ((product.warrantyHours ?? 24) > 0) {
@@ -127,9 +87,9 @@ export function richProductMessage(
 
   return {
     blocks: [
-      { type: "heading", size: 2, text: `${product.emoji} ${product.name}${product.featured ? " 🔥" : ""}` },
-      { type: "paragraph", text: product.category },
-      ...(product.description.trim() ? [{ type: "paragraph" as const, text: product.description.trim() }] : []),
+      richHeading(`${product.emoji} ${product.name}${product.featured ? " 🔥" : ""}`),
+      richParagraph(product.category),
+      ...(product.description.trim() ? [richParagraph(product.description.trim())] : []),
       keyValueTable(rows, "Item details"),
       ...(actions.length ? [richButtonRow(actions)] : []),
     ],
@@ -151,11 +111,11 @@ export function richPurchaseConfirmationMessage(
 ): InputRichMessage {
   const total = product.price * product.quantity;
   const canAfford = product.credits >= total;
-  const available = product.isUnlimited ? "Unlimited" : `${product.stock.toLocaleString("en-US")} available`;
+  const available = product.isUnlimited ? smallCaps("Unlimited") : `${product.stock.toLocaleString("en-US")} ${smallCaps("available")}`;
   return {
     blocks: [
-      { type: "heading", size: 2, text: "Confirm purchase" },
-      { type: "paragraph", text: `${product.emoji} ${product.name} · ${product.category}` },
+      richHeading("Confirm purchase"),
+      richParagraph(`${product.emoji} ${product.name} · ${product.category}`),
       keyValueTable([
         ["Unit price", creditLabel(product.price)],
         ["Quantity", `${product.quantity}`],
@@ -163,15 +123,12 @@ export function richPurchaseConfirmationMessage(
         ["Stock", available],
         ["Available balance", creditLabel(product.credits)],
         ["Balance after purchase", canAfford ? creditLabel(product.credits - total) : `Short by ${creditLabel(total - product.credits)}`],
-        ["Policy", "No refunds · all sales are final"],
+        ["Policy", smallCaps("No refunds · all sales are final")],
       ], "Review before buying"),
       ...actionRows.map((actions) => richButtonRow(actions)),
-      {
-        type: "footer",
-        text: canAfford
-          ? "Credits are charged only if the requested stock is assigned successfully."
-          : `You need ${creditLabel(total - product.credits)} more to buy this item.`,
-      },
+      richFooter(canAfford
+        ? smallCaps("Credits are charged only if the requested stock is assigned successfully.")
+        : `${smallCaps("You need")} ${creditLabel(total - product.credits)} ${smallCaps("more to buy this item.")}`),
     ],
   };
 }
@@ -198,7 +155,7 @@ export function richOrderHistoryMessage(
       : issueStatus === "REJECTED" ? "Issue closed"
       : "Delivered";
     return [
-      `${purchase.product.emoji} ${purchase.product.name}\n#${purchase.id.slice(0, 8)} · ${status}`,
+      `${purchase.product.emoji} ${purchase.product.name}\n#${purchase.id.slice(0, 8)} · ${smallCaps(status)}`,
       creditLabel(purchase.amountPaid),
       formatDate(purchase.createdAt),
     ];
@@ -216,8 +173,8 @@ export function richOrderHistoryMessage(
 
   return {
     blocks: [
-      { type: "heading", size: 2, text: "📦 Your orders" },
-      { type: "paragraph", text: `Private purchase history · ${total} order${total === 1 ? "" : "s"}. Select an order to view its delivery details.` },
+      richHeading("📦 Your orders"),
+      richParagraph(`${smallCaps("Private purchase history")} · ${total} ${smallCaps(total === 1 ? "order" : "orders")}. ${smallCaps("Select an order to view its delivery details.")}`),
       dataTable(["Item / order", "Paid", "Purchased"], rows, "Order history", ["left", "right", "right"]),
       ...orderButtons,
       ...(pageButtons.length ? [richButtonRow(pageButtons)] : []),
@@ -245,21 +202,21 @@ export function richOrderDetailMessage(input: {
       ["Category", input.categoryName],
       ["Paid", creditLabel(input.amountPaid)],
       ["Date", formatDate(input.createdAt)],
-      ["Replacement", input.warrantyStatus],
+      ["Replacement", smallCaps(input.warrantyStatus)],
     ], "Order summary"),
-    { type: "heading", size: 3, text: "Delivered credentials & details" },
+    richHeading("Delivered credentials & details", 3),
     ...richCredentialBlocks(input.payload),
   ];
-  if (input.planDetails.trim()) blocks.push({ type: "paragraph", text: `Plan / specs: ${input.planDetails.trim()}` });
+  if (input.planDetails.trim()) blocks.push(richParagraph(`${smallCaps("Plan / specs")}: ${input.planDetails.trim()}`));
   if (input.deliveryInstructions.trim()) {
     blocks.push({
       type: "expandable_blockquote",
       text: input.deliveryInstructions.trim(),
-      credit: "Login guide & rules",
+      credit: smallCaps("Login guide & rules"),
     });
   }
   if (input.actions?.length) blocks.push(richButtonRow(input.actions));
-  blocks.push({ type: "footer", text: "Keep these credentials private. Sales are final; refunds are not offered." });
+  blocks.push(richFooter(smallCaps("Keep these credentials private. Sales are final; refunds are not offered.")));
   return { blocks };
 }
 
@@ -269,7 +226,7 @@ export function richPurchaseDeliveryMessage(
 ): InputRichMessage {
   const items = result.payloads && result.payloads.length > 1 ? result.payloads : [result.payload];
   const blocks: InputRichBlock[] = [
-    { type: "heading", size: 2, text: "Purchase complete" },
+    richHeading("Purchase complete"),
     keyValueTable([
       ["Order", `#${result.purchaseId.slice(0, 8)}`],
       ["Product", `${result.productEmoji} ${result.productName}${items.length > 1 ? ` × ${items.length}` : ""}`],
@@ -278,22 +235,22 @@ export function richPurchaseDeliveryMessage(
     ], "Receipt"),
   ];
   for (const [index, payload] of items.entries()) {
-    if (items.length > 1) blocks.push({ type: "heading", size: 3, text: `Delivery ${index + 1}` });
+    if (items.length > 1) blocks.push(richHeading(`${smallCaps("Delivery")} ${index + 1}`, 3));
     blocks.push(...richCredentialBlocks(payload));
   }
-  if (result.planDetails?.trim()) blocks.push({ type: "paragraph", text: `Plan / specs: ${result.planDetails.trim()}` });
+  if (result.planDetails?.trim()) blocks.push(richParagraph(`${smallCaps("Plan / specs")}: ${result.planDetails.trim()}`));
   if (result.deliveryInstructions?.trim()) {
     blocks.push({
       type: "expandable_blockquote",
       text: result.deliveryInstructions.trim(),
-      credit: "Login guide & rules",
+      credit: smallCaps("Login guide & rules"),
     });
   }
   if (result.warrantyHours && result.warrantyHours > 0) {
-    blocks.push({ type: "paragraph", text: `Replacement coverage: ${result.warrantyHours} hours. Report an issue from My Orders.` });
+    blocks.push(richParagraph(`${smallCaps("Replacement coverage")}: ${result.warrantyHours} ${smallCaps("hours. Report an issue from My Orders.")}`));
   }
   blocks.push(...actionRows.map((actions) => richButtonRow(actions)));
-  blocks.push({ type: "footer", text: "Keep these credentials private. All sales are final; refunds are not offered." });
+  blocks.push(richFooter(smallCaps("Keep these credentials private. All sales are final; refunds are not offered.")));
   return { blocks };
 }
 
@@ -301,16 +258,16 @@ export function richHomeMessage(firstName: string | null | undefined): InputRich
   const name = safeText(firstName, "friend");
   return {
     blocks: [
-      { type: "heading", size: 1, text: `✨ Welcome, ${name}` },
+      richHeading([smallCaps("✨ Welcome, "), name], 1),
       {
         type: "paragraph",
-        text: "Your private digital store for authorized goods, daily credits, and secure delivery.",
+        text: smallCaps("Your private digital store for authorized goods, daily credits, and secure delivery."),
       },
       richButtonRow([
         richCallbackButton("🛍 Browse store", "nav:store", "primary"),
         richCallbackButton("🎁 Daily bonus", "nav:bonus", "success"),
       ]),
-      { type: "heading", size: 4, text: "YOUR ACCOUNT" },
+      richHeading("YOUR ACCOUNT", 4),
       richButtonRow([
         richCallbackButton("👤 Profile", "nav:profile"),
         richCallbackButton("💳 Wallet", "nav:wallet"),
@@ -320,15 +277,15 @@ export function richHomeMessage(firstName: string | null | undefined): InputRich
         richCallbackButton("ℹ️ Help & commands", "nav:help", "link"),
       ]),
       richButtonRow([
-        { text: "👑 Contact support", url: "https://t.me/YoriNetwork" },
+        { text: smallCaps("👑 Contact support"), url: "https://t.me/YoriNetwork" },
       ]),
-      { type: "footer", text: "Orders are delivered privately to the account that placed them." },
+      richFooter(smallCaps("Orders are delivered privately to the account that placed them.")),
     ],
   };
 }
 
 export function richHelpMessage(): InputRichMessage {
-  const commands = [
+  const commands: Array<readonly [string, string]> = [
     ["/start", "Open the welcome screen"],
     ["/store", "Browse categories and products"],
     ["/search", "Search the catalog by keyword"],
@@ -343,19 +300,16 @@ export function richHelpMessage(): InputRichMessage {
   ];
   return {
     blocks: [
-      { type: "heading", size: 1, text: "ℹ️ Help & commands" },
-      { type: "paragraph", text: "Use a command below or choose an action. Only public commands and /admin are listed here." },
-      dataTable(["Command", "What it does"], commands, "Quick reference"),
-      {
-        type: "footer",
-        text: "Purchases are private and final. Eligible delivery issues can be reviewed for replacement; refunds are not offered.",
-      },
+      richHeading("ℹ️ Help & commands", 1),
+      richParagraph("Use a command below or choose an action. Only public commands and /admin are listed here.", true),
+      dataTable(["Command", "What it does"], commands.map(([command, description]) => [command, smallCaps(description)]), "Quick reference"),
+      richFooter(smallCaps("Purchases are private and final. Eligible delivery issues can be reviewed for replacement; refunds are not offered.")),
       richButtonRow([
         richCallbackButton("🛍 Browse store", "nav:store", "primary"),
         richCallbackButton("🎁 Daily bonus", "nav:bonus", "success"),
       ]),
       richButtonRow([
-        { text: "👑 Contact support", url: "https://t.me/YoriNetwork" },
+        { text: smallCaps("👑 Contact support"), url: "https://t.me/YoriNetwork" },
       ]),
     ],
   };
@@ -363,12 +317,12 @@ export function richHelpMessage(): InputRichMessage {
 
 export function welcomeMessage(firstName: string | null | undefined): string {
   const name = escapeHtml(safeText(firstName, "friend"));
-  return `✨ <b>Welcome to Iris, ${name}</b>\n\n` +
-    `Your private digital store for authorized goods, daily credits, and secure delivery.\n\n` +
-    `🛍 Browse categories and featured items\n` +
-    `🎁 Claim your daily credits\n` +
-    `📦 Keep track of purchases and receipts\n\n` +
-    `Choose where to begin below.`;
+  return `✨ <b>${smallCaps("Welcome to Iris, ")}${name}</b>\n\n` +
+    `${smallCaps("Your private digital store for authorized goods, daily credits, and secure delivery.")}\n\n` +
+    `🛍 ${smallCaps("Browse categories and featured items")}\n` +
+    `🎁 ${smallCaps("Claim your daily credits")}\n` +
+    `📦 ${smallCaps("Keep track of purchases and receipts")}\n\n` +
+    `${smallCaps("Choose where to begin below.")}`;
 }
 
 export function profileMessage(input: {

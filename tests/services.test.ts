@@ -73,15 +73,16 @@ function makeTestBot() {
   let messageId = 1_000;
   bot.api.config.use(async (_previous, method, payload) => {
     calls.push({ method, payload: payload as Record<string, unknown> });
-    if (method === "sendMessage") {
-      const send = payload as { chat_id: number | string; text: string };
+    if (method === "sendMessage" || method === "sendRichMessage") {
+      const send = payload as { chat_id: number | string; text?: string; rich_message?: unknown };
       return {
         ok: true,
         result: {
           message_id: messageId++,
           date: Math.floor(Date.now() / 1_000),
           chat: { id: Number(send.chat_id), type: "private", first_name: "Test" },
-          text: send.text,
+          ...(send.text ? { text: send.text } : {}),
+          ...(send.rich_message ? { rich_message: send.rich_message } : {}),
         },
       } as never;
     }
@@ -96,6 +97,18 @@ function richCallbackData(value: unknown): string[] {
   const record = value as Record<string, unknown>;
   const current = typeof record.callback_data === "string" ? [record.callback_data] : [];
   return [...current, ...Object.values(record).flatMap(richCallbackData)];
+}
+
+function containsRichDocument(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsRichDocument);
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return record.type === "document" || Object.values(record).some(containsRichDocument);
+}
+
+function isDocumentCall(call: CapturedApiCall): boolean {
+  return call.method === "sendDocument" ||
+    (call.method === "sendRichMessage" && containsRichDocument(call.payload.rich_message));
 }
 
 describe("runtime configuration", () => {
@@ -689,9 +702,11 @@ describe("Telegram authorization and callback ownership", () => {
     expect(await prisma.creditTransaction.count()).toBe(0);
     expect(await prisma.category.count()).toBe(0);
     expect(await prisma.resetChallenge.count()).toBe(0);
-    const deniedReplies = calls.filter((call) => call.method === "sendMessage").map((call) => String(call.payload.text));
+    const deniedReplies = calls
+      .filter((call) => call.method === "sendMessage" || call.method === "sendRichMessage")
+      .map((call) => JSON.stringify(call.payload.rich_message ?? call.payload.text));
     expect(deniedReplies).toHaveLength(commands.length);
-    expect(deniedReplies.every((text) => text.includes("reserved for the Iris owner"))).toBe(true);
+    expect(deniedReplies.every((text) => text.includes("ʀᴇꜱᴇʀᴠᴇᴅ ꜰᴏʀ ᴛʜᴇ ɪʀɪꜱ ᴏᴡɴᴇʀ"))).toBe(true);
     expect(calls.some((call) => call.method.startsWith("editMessage"))).toBe(false);
   });
 
@@ -701,7 +716,7 @@ describe("Telegram authorization and callback ownership", () => {
 
     const panelCall = calls.find((call) => call.method === "sendRichMessage");
     expect(panelCall).toBeDefined();
-    expect(JSON.stringify(panelCall?.payload.rich_message)).toContain("Owner console");
+    expect(JSON.stringify(panelCall?.payload.rich_message)).toContain("ᴏᴡɴᴇʀ ᴄᴏɴꜱᴏʟᴇ");
     const actions = richCallbackData(panelCall?.payload.rich_message);
     for (const data of [
       "admin:products:0",
@@ -760,8 +775,9 @@ describe("Telegram authorization and callback ownership", () => {
     const { bot, calls } = makeTestBot();
     await bot.handleUpdate(privateMessageUpdate(Number(OWNER_ID), "/reset"));
 
-    const documentIndex = calls.findIndex((call) => call.method === "sendDocument");
-    const previewIndex = calls.findIndex((call) => call.method === "sendMessage");
+    const documentIndex = calls.findIndex(isDocumentCall);
+    const previewIndex = calls.findIndex((call) => call.method === "sendRichMessage" &&
+      richCallbackData(call.payload.rich_message).some((data) => data.startsWith("reset:continue:")));
     expect(documentIndex).toBeGreaterThanOrEqual(0);
     expect(previewIndex).toBeGreaterThan(documentIndex);
     expect(await prisma.user.count()).toBe(beforeUsers + 1);
@@ -770,10 +786,7 @@ describe("Telegram authorization and callback ownership", () => {
     expect(challenge.stage).toBe(1);
 
     const preview = calls[previewIndex];
-    const markup = preview?.payload.reply_markup as {
-      inline_keyboard?: Array<Array<{ text?: string; callback_data?: string }>>;
-    } | undefined;
-    const cancelData = markup?.inline_keyboard?.flat().find((button) => button.text?.includes("CANCEL"))?.callback_data;
+    const cancelData = richCallbackData(preview?.payload.rich_message).find((data) => data.startsWith("reset:cancel:"));
     expect(cancelData).toBe(`reset:cancel:${challenge.id}`);
     await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), cancelData!));
     expect(await prisma.user.count()).toBe(beforeUsers + 1);
@@ -788,22 +801,18 @@ describe("Telegram authorization and callback ownership", () => {
     const { bot, calls } = makeTestBot();
     await bot.handleUpdate(privateMessageUpdate(Number(OWNER_ID), "/reset"));
 
-    const initialPrompt = calls.find((call) => call.method === "sendMessage");
-    const initialMarkup = initialPrompt?.payload.reply_markup as {
-      inline_keyboard?: Array<Array<{ text?: string; callback_data?: string }>>;
-    } | undefined;
-    const continueData = initialMarkup?.inline_keyboard?.flat().find((button) => button.text?.includes("CONTINUE"))?.callback_data;
+    const initialPrompt = calls.find((call) => call.method === "sendRichMessage" &&
+      richCallbackData(call.payload.rich_message).some((data) => data.startsWith("reset:continue:")));
+    const continueData = richCallbackData(initialPrompt?.payload.rich_message)
+      .find((data) => data.startsWith("reset:continue:"));
     expect(continueData).toBeDefined();
     const [, , challengeId] = continueData!.split(":");
     await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), continueData!));
 
     const finalPrompt = calls.filter((call) => call.method === "editMessageText").at(-1);
-    const finalMarkup = finalPrompt?.payload.reply_markup as {
-      inline_keyboard?: Array<Array<{ text?: string; callback_data?: string }>>;
-    } | undefined;
-    const deleteData = finalMarkup?.inline_keyboard?.flat().find((button) => button.text?.includes("DELETE EVERYTHING"))?.callback_data;
+    const deleteData = richCallbackData(finalPrompt?.payload.rich_message).find((data) => data.startsWith("reset:delete:"));
     expect(deleteData).toBeDefined();
-    const documentCallsBeforeDelete = calls.flatMap((call, index) => call.method === "sendDocument" ? [index] : []);
+    const documentCallsBeforeDelete = calls.flatMap((call, index) => isDocumentCall(call) ? [index] : []);
     expect(documentCallsBeforeDelete).toHaveLength(2);
     expect(documentCallsBeforeDelete[1]).toBeLessThan(calls.indexOf(finalPrompt!));
     expect(await prisma.product.count()).toBe(1);
@@ -824,7 +833,7 @@ describe("Telegram authorization and callback ownership", () => {
     expect(await prisma.adminAudit.count()).toBe(2);
     expect(await prisma.adminAudit.count({ where: { action: "RESET_COMPLETED" } })).toBe(1);
     expect((await prisma.resetChallenge.findUniqueOrThrow({ where: { id: challengeId! } })).usedAt).toBeInstanceOf(Date);
-    expect(calls.filter((call) => call.method === "sendDocument")).toHaveLength(2);
+    expect(calls.filter(isDocumentCall)).toHaveLength(2);
   });
 
   it("only accepts a purchase callback from the user with a live matching confirmation", async () => {
@@ -904,9 +913,9 @@ describe("Telegram authorization and callback ownership", () => {
     expect(await countAvailableInventory(prisma, product.id)).toBe(1);
 
     await bot.handleUpdate(privateMessageUpdate(Number(OWNER_ID), "/admin"));
-    expect(calls.some((call) => call.method === "sendRichMessage" && JSON.stringify(call.payload.rich_message).includes("Owner console"))).toBe(true);
+    expect(calls.some((call) => call.method === "sendRichMessage" && JSON.stringify(call.payload.rich_message).includes("ᴏᴡɴᴇʀ ᴄᴏɴꜱᴏʟᴇ"))).toBe(true);
     await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), "admin:panel"));
-    expect(calls.some((call) => call.method === "editMessageText" && JSON.stringify(call.payload.rich_message ?? "").includes("Owner console"))).toBe(true);
+    expect(calls.some((call) => call.method === "editMessageText" && JSON.stringify(call.payload.rich_message ?? "").includes("ᴏᴡɴᴇʀ ᴄᴏɴꜱᴏʟᴇ"))).toBe(true);
   });
 
   it("returns safe responses for malformed owner and user commands", async () => {
@@ -919,14 +928,16 @@ describe("Telegram authorization and callback ownership", () => {
     try {
       const commands = ["/gift", "/gift abc 20", "/gift 123 abc", "/rm", "/code", "/redeem", "/redeem invalid-code"];
       for (const text of commands) await bot.handleUpdate(privateMessageUpdate(Number(OWNER_ID), text));
-      const replies = calls.filter((call) => call.method === "sendMessage").map((call) => String(call.payload.text));
+      const replies = calls
+        .filter((call) => call.method === "sendMessage" || call.method === "sendRichMessage")
+        .map((call) => JSON.stringify(call.payload.rich_message ?? call.payload.text));
       expect(replies).toHaveLength(commands.length);
-      expect(replies.some((text) => text.includes("Use: /gift &lt;userid&gt; &lt;credits&gt;"))).toBe(true);
+      expect(replies.some((text) => text.includes("Use: /gift <userid> <credits>"))).toBe(true);
       expect(replies.some((text) => text.includes("positive Telegram user ID"))).toBe(true);
       expect(replies.some((text) => text.includes("positive whole number"))).toBe(true);
-      expect(replies.some((text) => text.includes("Use: /rm &lt;userid&gt; &lt;credits&gt;"))).toBe(true);
-      expect(replies.some((text) => text.includes("Use: /code &lt;amount&gt; &lt;credits&gt; &lt;maxredeems&gt;"))).toBe(true);
-      expect(replies.some((text) => text.includes("Use /redeem IRIS-XXXX"))).toBe(true);
+      expect(replies.some((text) => text.includes("Use: /rm <userid> <credits>"))).toBe(true);
+      expect(replies.some((text) => text.includes("Use: /code <amount> <credits> <maxredeems>"))).toBe(true);
+      expect(replies.some((text) => text.includes("/redeem IRIS-XXXX"))).toBe(true);
       expect(replies.some((text) => text.includes("invalid, expired, or fully redeemed"))).toBe(true);
       expect(replies.every((text) => !text.includes(" at ") && !text.includes("Error:"))).toBe(true);
     } finally {
@@ -971,25 +982,24 @@ describe("customer wallet activity", () => {
 
     const { bot, calls } = makeTestBot();
     await bot.handleUpdate(privateMessageUpdate(Number(user.telegramId), "/wallet"));
-    const firstPage = calls.filter((call) => call.method === "sendMessage").at(-1);
-    expect(String(firstPage?.payload.text)).toContain("250 ᴄʀᴇᴅɪᴛs");
-    expect(String(firstPage?.payload.text)).toContain("&lt;script&gt;private&lt;/script&gt;&amp;");
-    expect(String(firstPage?.payload.text)).not.toContain("<script>");
-    expect(String(firstPage?.payload.text)).not.toContain("Other user's private activity");
-    expect(String(firstPage?.payload.text)).toContain("Ledger event 7");
-    expect(String(firstPage?.payload.text)).not.toContain("Ledger event 0");
+    const firstPage = calls.filter((call) => call.method === "sendRichMessage").at(-1);
+    const firstRich = JSON.stringify(firstPage?.payload.rich_message);
+    expect(firstRich).toContain("250 ᴄʀᴇᴅɪᴛꜱ");
+    // Rich text cells carry literal user text rather than HTML, so markup-looking values stay inert plain text.
+    expect(firstRich).toContain("<script>private</script>&");
+    expect(firstRich).not.toContain("Other user's private activity");
+    expect(firstRich).toContain("Ledger event 7");
+    expect(firstRich).not.toContain("Ledger event 0");
 
-    const markup = firstPage?.payload.reply_markup as {
-      inline_keyboard?: Array<Array<{ text?: string; callback_data?: string }>>;
-    } | undefined;
-    const nextPageData = markup?.inline_keyboard?.flat().find((button) => button.callback_data === "wallet:page:1")?.callback_data;
+    const nextPageData = richCallbackData(firstPage?.payload.rich_message).find((data) => data === "wallet:page:1");
     expect(nextPageData).toBe("wallet:page:1");
     await bot.handleUpdate(privateCallbackUpdate(Number(user.telegramId), nextPageData!));
 
     const secondPage = calls.filter((call) => call.method === "editMessageText").at(-1);
-    expect(String(secondPage?.payload.text)).toContain("Ledger event 0");
-    expect(String(secondPage?.payload.text)).not.toContain("Ledger event 7");
-    expect(String(secondPage?.payload.text)).not.toContain("Other user's private activity");
+    const secondRich = JSON.stringify(secondPage?.payload.rich_message);
+    expect(secondRich).toContain("Ledger event 0");
+    expect(secondRich).not.toContain("Ledger event 7");
+    expect(secondRich).not.toContain("Other user's private activity");
   });
 });
 
@@ -997,6 +1007,29 @@ describe("Telegram message editing", () => {
   const logger = {
     trace: vi.fn(), debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn(),
   } as unknown as AppLogger;
+
+  it("renders legacy menu copy and inline callbacks through rich HTML button rows", async () => {
+    const api = { editMessageText: vi.fn().mockResolvedValue(true) };
+    const reply = vi.fn().mockResolvedValue(undefined);
+    const context = {
+      callbackQuery: {
+        message: {
+          message_id: 99,
+          date: 1,
+          chat: { id: 88_000, type: "private" },
+          text: "Old menu",
+        },
+      },
+      api,
+      reply,
+    } as unknown as BotContext;
+
+    await editOrReply(context, "<b>Store menu</b>", new InlineKeyboard().text("Back to store", "nav:store"), logger);
+
+    const richInput = api.editMessageText.mock.calls[0]?.[2] as { html?: string } | undefined;
+    expect(richInput?.html).toContain("<b>Store menu</b>");
+    expect(richInput?.html).toContain('<tg-button type="callback_data" data="nav:store">ʙᴀᴄᴋ ᴛᴏ ꜱᴛᴏʀᴇ</tg-button>');
+  });
 
   it("ignores unchanged-edit errors and falls back when a callback message cannot be edited", async () => {
     const makeContext = (error: GrammyError) => {
@@ -1158,13 +1191,14 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
     let richCall = calls.filter((call) => call.method === "editMessageText").at(-1);
     const productRichMessage = JSON.stringify(richCall?.payload.rich_message);
     expect(productRichMessage).toContain("table");
-    expect(productRichMessage).toContain("is_compact");
-    expect(productRichMessage).toContain("No refunds");
+    expect(productRichMessage).toContain("is_bordered");
+    expect(productRichMessage).toContain("is_striped");
+    expect(productRichMessage).toContain("ɴᴏ ʀᴇꜰᴜɴᴅꜱ");
     expect(richCallbackData(richCall?.payload.rich_message)).toContain(`buy:start:${product.id}`);
 
     await bot.handleUpdate(privateCallbackUpdate(telegramId, `buy:start:${product.id}`));
     richCall = calls.filter((call) => call.method === "editMessageText").at(-1);
-    expect(JSON.stringify(richCall?.payload.rich_message)).toContain("Review before buying");
+    expect(JSON.stringify(richCall?.payload.rich_message)).toContain("ʀᴇᴠɪᴇᴡ ʙᴇꜰᴏʀᴇ ʙᴜʏɪɴɢ");
     const confirmData = richCallbackData(richCall?.payload.rich_message)
       .find((data) => data.startsWith("buy:confirm:"));
     expect(confirmData).toBeDefined();
@@ -1182,7 +1216,7 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
     await bot.handleUpdate(privateCallbackUpdate(telegramId, "nav:orders"));
     richCall = calls.filter((call) => call.method === "editMessageText").at(-1);
     const ordersRichMessage = JSON.stringify(richCall?.payload.rich_message);
-    expect(ordersRichMessage).toContain("Order history");
+    expect(ordersRichMessage).toContain("ᴏʀᴅᴇʀ ʜɪꜱᴛᴏʀʏ");
     expect(ordersRichMessage).toContain("Rich-table streaming");
     const orderId = await prisma.purchase.findFirstOrThrow({ where: { buyerId: buyer.id } }).then((order) => order.id);
     expect(richCallbackData(richCall?.payload.rich_message)).toContain(`order:view:${orderId}`);
@@ -1190,7 +1224,7 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
     await bot.handleUpdate(privateCallbackUpdate(telegramId, `order:view:${orderId}`));
     richCall = calls.filter((call) => call.method === "editMessageText").at(-1);
     const orderDetail = JSON.stringify(richCall?.payload.rich_message);
-    expect(orderDetail).toContain("Login details");
+    expect(orderDetail).toContain("ʟᴏɢɪɴ ᴅᴇᴛᴀɪʟꜱ");
     expect(orderDetail).toContain("buyer@example.test");
     expect(orderDetail).toContain("StrongPass123");
     expect(orderDetail).toContain("expandable_blockquote");
@@ -1201,7 +1235,7 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
     const receiptBlocks = (receiptCall?.payload.rich_message as { blocks?: Array<Record<string, unknown>> } | undefined)?.blocks;
     const receiptBlock = receiptBlocks?.find((block) => block.type === "document");
     expect(receiptBlock).toBeDefined();
-    expect(receiptBlock?.caption).toMatchObject({ text: `📄 Order receipt · #${orderId.slice(0, 8)}` });
+    expect(receiptBlock?.caption).toMatchObject({ text: `📄 ᴏʀᴅᴇʀ ʀᴇᴄᴇɪᴘᴛ · #${orderId.slice(0, 8)}` });
 
     const lowFundsUser = await makeUser(91_011n, 5);
     const { product: unaffordableProduct } = await makeProduct("Premium add-on", 20);
@@ -1282,17 +1316,14 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
     const { bot, calls } = makeTestBot();
     await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), `admin:warranty:view:${secondClaim.id}`));
     const claimDetail = calls.filter((call) => call.method === "editMessageText").at(-1);
-    const claimMarkup = claimDetail?.payload.reply_markup as {
-      inline_keyboard?: Array<Array<{ callback_data?: string }>>;
-    } | undefined;
-    const claimButtons = claimMarkup?.inline_keyboard?.flat().map((button) => button.callback_data);
+    const claimButtons = richCallbackData(claimDetail?.payload.rich_message);
     expect(claimButtons).toContain(`admin:warranty:replace:${secondClaim.id}`);
     expect(claimButtons).toContain(`admin:warranty:reject:${secondClaim.id}`);
     expect(claimButtons?.some((data) => data?.includes("refund"))).toBe(false);
 
     await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), `admin:warranty:refund:${secondClaim.id}`));
     const noRefundResponse = calls.filter((call) => call.method === "editMessageText").at(-1);
-    expect(String(noRefundResponse?.payload.text)).toContain("Refunds are not offered");
+    expect(JSON.stringify(noRefundResponse?.payload.rich_message)).toContain("ʀᴇꜰᴜɴᴅꜱ ᴀʀᴇ ɴᴏᴛ ᴏꜰꜰᴇʀᴇᴅ");
     expect((await prisma.user.findUniqueOrThrow({ where: { id: buyer.id } })).credits).toBe(beforeAttempt.credits);
     expect((await prisma.warrantyClaim.findUniqueOrThrow({ where: { id: secondClaim.id } })).status).toBe("PENDING");
     expect(await prisma.creditTransaction.count({ where: { userId: buyer.id, type: "REFUND" } })).toBe(0);
@@ -1312,10 +1343,10 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
     await bot.handleUpdate(privateMessageUpdate(Number(OWNER_ID), "spot@music.com:pass123 | Plan: Individual"));
 
     const restockAlert = calls.find(
-      (call) => call.method === "sendMessage" && Number(call.payload.chat_id) === Number(subscriber.telegramId),
+      (call) => call.method === "sendRichMessage" && Number(call.payload.chat_id) === Number(subscriber.telegramId),
     );
     expect(restockAlert).toBeDefined();
-    expect(String(restockAlert?.payload.text)).toContain("Spotify Premium");
+    expect(JSON.stringify(restockAlert?.payload.rich_message)).toContain("Spotify Premium");
     expect(await isSubscribedToStock(prisma, subscriber.id, product.id)).toBe(false);
     expect(await consumeStockSubscribers(prisma, product.id)).toHaveLength(0);
   });

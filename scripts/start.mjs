@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import console from "node:console";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -23,6 +23,19 @@ const APPLYING_MIGRATION = /Applying migration [`"']?([A-Za-z0-9_.-]+)[`"']?/g;
  */
 const BASELINEABLE_CONFLICT =
   /already exists|duplicate_object|duplicate_table|duplicate_column|duplicate_schema|42P06|42P07|42701|42710/i;
+
+/**
+ * Prisma error P3005: `migrate deploy` refuses to touch a database that already
+ * has tables but no `_prisma_migrations` history. Nothing was attempted yet, so
+ * there is no "Applying migration" line to learn a migration name from — the
+ * recovery is to record the earliest committed migration as applied (its objects
+ * are the reason the schema is not empty) and retry, letting later migrations
+ * run for real and the conflict path below handle anything else already present.
+ */
+const SCHEMA_NOT_EMPTY = /P3005|database schema is not empty/i;
+
+/** Directory holding the committed migrations, relative to the project root. */
+const MIGRATIONS_DIR = path.join("prisma", "migrations");
 
 /**
  * Failures that mean the migration tooling itself could not run (missing or
@@ -70,6 +83,24 @@ export function isMigrationToolingUnavailable(output) {
   return Boolean(output) && MIGRATION_TOOLING_UNAVAILABLE.test(output);
 }
 
+export function isSchemaNotEmpty(output) {
+  return Boolean(output) && SCHEMA_NOT_EMPTY.test(output);
+}
+
+/**
+ * Committed migration names, oldest first. Migration directories carry a
+ * timestamp prefix, so lexicographic order is chronological order. Anything
+ * that is not a migration directory (e.g. migration_lock.toml) is ignored.
+ */
+export function listMigrations(root = rootDir) {
+  const migrationsDir = path.join(root, MIGRATIONS_DIR);
+  if (!existsSync(migrationsDir)) return [];
+  return readdirSync(migrationsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+}
+
 function defaultRunner(command, args, { root, databaseUrl }) {
   const result = spawnSync(command, args, {
     cwd: root,
@@ -89,10 +120,14 @@ function defaultRunner(command, args, { root, databaseUrl }) {
  * which leaves production refusing to boot with "Database schema is not ready".
  * This runs the same official, non-destructive command before the app starts.
  *
- * If a database was created without migration history, deploy stops on the first
- * migration whose objects already exist. That migration is recorded as applied
- * with `prisma migrate resolve --applied` — the recovery the README documents —
- * and deploy is retried. Nothing is ever reset, pushed, or generated here.
+ * If a database was created without migration history, deploy either refuses to
+ * start at all (P3005 "database schema is not empty") or stops on the first
+ * migration whose objects already exist. In both cases the affected migration
+ * is recorded as applied with `prisma migrate resolve --applied` — the recovery
+ * the README documents — and deploy is retried. For P3005 that is the earliest
+ * committed migration; afterwards genuinely pending migrations run for real and
+ * any further already-present objects take the conflict path. Nothing is ever
+ * reset, pushed, or generated here.
  */
 export function applyPendingMigrations({
   databaseUrl,
@@ -112,8 +147,13 @@ export function applyPendingMigrations({
     output = deploy.output;
     if (deploy.status === 0) return { status: "applied", baselined, output };
 
-    const migration = migrationToBaseline(deploy.output);
-    // Without a conflict, or if we already baselined it, retrying cannot help.
+    const conflicted = migrationToBaseline(deploy.output);
+    // P3005 means deploy refused to start on a database with tables but no
+    // migration history: baseline the earliest committed migration, whose
+    // objects are the reason the schema is not empty, and retry.
+    const migration =
+      conflicted ?? (isSchemaNotEmpty(deploy.output) ? listMigrations(root)[0] ?? null : null);
+    // Nothing to baseline, or we already baselined it: retrying cannot help.
     if (!migration || baselined.includes(migration)) {
       return {
         status: isMigrationToolingUnavailable(deploy.output) ? "unavailable" : "failed",
@@ -123,7 +163,9 @@ export function applyPendingMigrations({
     }
 
     log.warn?.(
-      `Migration ${migration} found objects that already exist; recording it as applied so the remaining migrations can run.`,
+      conflicted
+        ? `Migration ${migration} found objects that already exist; recording it as applied so the remaining migrations can run.`
+        : `Database has tables but no Prisma migration history; recording the base migration ${migration} as applied so the remaining migrations can run.`,
     );
     const resolved = runner(
       prisma.command,

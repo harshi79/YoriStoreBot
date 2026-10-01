@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   applyPendingMigrations,
   isMigrationToolingUnavailable,
+  isSchemaNotEmpty,
+  listMigrations,
   migrationToBaseline,
   readDatabaseUrl,
   shouldSkipMigrations,
@@ -198,6 +200,96 @@ describe("applyPendingMigrations", () => {
     expect(deploys).toBe(3);
     expect(result.baselined).toHaveLength(3);
     expect(calls).toHaveLength(6);
+  });
+});
+
+describe("applyPendingMigrations on a history-less database refused with P3005", () => {
+  const P3005_OUTPUT = [
+    "Datasource \"db\": PostgreSQL database \"neondb\", schema \"public\" at \"ep-red-sun-b3oaelqw-pooler.c-4.ap-southeast-1.aws.neon.tech\"",
+    "3 migrations found in prisma/migrations",
+    "Error: P3005",
+    "The database schema is not empty. Read more about how to baseline an existing production database: https://pris.ly/d/migrate-baseline",
+  ].join("\n");
+
+  it("baselines the earliest committed migration, then applies the pending ones", () => {
+    const { runner, calls } = fakeRunner([
+      { status: 1, output: P3005_OUTPUT },
+      { status: 0, output: "Migration 20260930000000_init marked as applied." },
+      {
+        status: 0,
+        output:
+          "Applying migration `20261002000000_purchase_batches`\nApplying migration `20261002010000_mini_app_wishlist`",
+      },
+    ]);
+    const log = makeLog();
+    const result = applyPendingMigrations({ databaseUrl: DATABASE_URL, runner, prisma, log });
+    expect(result.status).toBe("applied");
+    expect(result.baselined).toEqual(["20260930000000_init"]);
+    expect(calls.map((call) => call.args)).toEqual([
+      ["migrate", "deploy"],
+      ["migrate", "resolve", "--applied", "20260930000000_init"],
+      ["migrate", "deploy"],
+    ]);
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("20260930000000_init"));
+  });
+
+  it("keeps baselining later migrations whose objects are also already present", () => {
+    const { runner, calls } = fakeRunner([
+      { status: 1, output: P3005_OUTPUT },
+      { status: 0, output: "marked as applied" },
+      {
+        status: 1,
+        output:
+          'Applying migration `20261002010000_mini_app_wishlist`\nError: relation "wishlist_items" already exists',
+      },
+      { status: 0, output: "marked as applied" },
+      { status: 0, output: "Database schema is up to date!" },
+    ]);
+    const result = applyPendingMigrations({ databaseUrl: DATABASE_URL, runner, prisma, log: makeLog() });
+    expect(result.status).toBe("applied");
+    expect(result.baselined).toEqual(["20260930000000_init", "20261002010000_mini_app_wishlist"]);
+    expect(calls.filter((call) => call.args[1] === "deploy")).toHaveLength(3);
+  });
+
+  it("stops instead of re-baselining when P3005 repeats after the base migration", () => {
+    const { runner, calls } = fakeRunner([
+      { status: 1, output: P3005_OUTPUT },
+      { status: 0, output: "marked as applied" },
+      { status: 1, output: P3005_OUTPUT },
+    ]);
+    const result = applyPendingMigrations({ databaseUrl: DATABASE_URL, runner, prisma, log: makeLog() });
+    expect(result.status).toBe("failed");
+    expect(result.baselined).toEqual(["20260930000000_init"]);
+    expect(result.output).toContain("P3005");
+    expect(calls.filter((call) => call.args[1] === "deploy")).toHaveLength(2);
+    expect(calls.filter((call) => call.args[1] === "resolve")).toHaveLength(1);
+  });
+});
+
+describe("isSchemaNotEmpty", () => {
+  it("recognises Prisma's P3005 refusal to deploy onto a non-empty database", () => {
+    expect(isSchemaNotEmpty("Error: P3005\nThe database schema is not empty.")).toBe(true);
+    expect(isSchemaNotEmpty("The database schema is not empty. Read more about baselining.")).toBe(true);
+  });
+
+  it("does not treat conflicts, empty databases, or other errors as P3005", () => {
+    expect(isSchemaNotEmpty('Error: relation "users" already exists')).toBe(false);
+    expect(isSchemaNotEmpty("Error: P1001 Can't reach database server")).toBe(false);
+    expect(isSchemaNotEmpty("")).toBe(false);
+  });
+});
+
+describe("listMigrations", () => {
+  it("returns the committed migrations in chronological order", () => {
+    expect(listMigrations()).toEqual([
+      "20260930000000_init",
+      "20261002000000_purchase_batches",
+      "20261002010000_mini_app_wishlist",
+    ]);
+  });
+
+  it("returns an empty list when the migrations directory is missing", () => {
+    expect(listMigrations("/tmp/does-not-exist-iris")).toEqual([]);
   });
 });
 

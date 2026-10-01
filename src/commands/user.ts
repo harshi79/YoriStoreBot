@@ -25,6 +25,17 @@ import { richButtonRow, richCallbackButton, richHeading, richKeyValueTable, rich
 import { AlreadyRedeemedError, CodeUnavailableError, DomainError } from "../utils/errors.js";
 
 export function registerUserCommands(bot: Bot<BotContext>, deps: BotDependencies): void {
+  bot.command("app", async (ctx) => {
+    if (!(await requirePrivate(ctx))) return;
+    if (!deps.config.miniAppUrl) {
+      await ctx.reply("The Mini App is not configured yet. You can still use /store, /wallet, /profile and /orders here.");
+      return;
+    }
+    await ctx.reply("Your Iris space — store, wallet, orders and profile, all together.", {
+      reply_markup: new InlineKeyboard().webApp("Open Iris Mini App ↗", deps.config.miniAppUrl),
+    });
+  });
+
   bot.command("start", async (ctx) => {
     if (!(await requirePrivate(ctx))) return;
     ctx.session.adminFlow = null;
@@ -41,6 +52,11 @@ export function registerUserCommands(bot: Bot<BotContext>, deps: BotDependencies
       },
     );
     await sendWelcomeVideo(ctx, deps);
+    if (deps.config.miniAppUrl) {
+      await ctx.reply("✦ Your digital happy place, now in one beautiful space.", {
+        reply_markup: new InlineKeyboard().webApp("Open Iris Mini App ↗", deps.config.miniAppUrl),
+      });
+    }
 
     if (startResult.referralApplied && startResult.referrer) {
       const referrerLabel = startResult.referrer.username

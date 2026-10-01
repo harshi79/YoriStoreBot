@@ -1,5 +1,4 @@
 import "dotenv/config";
-import { createServer } from "node:http";
 import type { Server } from "node:http";
 import { GrammyError, HttpError } from "grammy";
 import { loadConfig } from "./config/env.js";
@@ -8,52 +7,29 @@ import { createLogger } from "./utils/logger.js";
 import { createBot } from "./bot/create-bot.js";
 import { registerCommandMenus } from "./bot/command-menu.js";
 import { cleanupExpiredResetChallenges } from "./services/admin.service.js";
-import type { AppLogger } from "./utils/logger.js";
-
-function startHealthServer(port: number, logger?: AppLogger): Promise<Server> {
-  return new Promise((resolve, reject) => {
-    const server = createServer((req, res) => {
-      if (req.method === "GET" || req.method === "HEAD") {
-        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-        if (req.method === "HEAD") {
-          res.end();
-        } else {
-          res.end(JSON.stringify({ status: "ok", service: "iris-credit-store-bot" }));
-        }
-        return;
-      }
-      res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ error: "not_found" }));
-    });
-
-    server.once("error", reject);
-    server.listen(port, "0.0.0.0", () => {
-      server.removeListener("error", reject);
-      if (logger) {
-        logger.info({ port }, "Health check HTTP server listening");
-      }
-      resolve(server);
-    });
-  });
-}
-
-function closeHealthServer(server: Server | null): Promise<void> {
-  if (!server) return Promise.resolve();
-  return new Promise((resolve) => {
-    server.close(() => resolve());
-  });
-}
+import { closeHealthServer } from "./http/health.js";
+import { createMiniAppServer, listenMiniApp } from "./mini-app/server.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function main(): Promise<void> {
+  // Validate production storage before opening an HTTP listener. Configuration
+  // errors must exit, not leave a healthy-looking server running without a bot.
+  const config = loadConfig();
+  const logger = createLogger(config);
+  const database = createDatabase(config.databaseUrl, config.databasePoolSize, logger, config.nodeEnv);
+  const bot = createBot({ config, database, logger });
   let healthServer: Server | null = null;
-  const rawPort = process.env.PORT ? Number.parseInt(process.env.PORT, 10) : NaN;
+  let ready = false;
+  let botUsername: string | null = null;
+  const rawPort = config.port ?? (config.miniAppUrl ? 3000 : NaN);
   if (Number.isInteger(rawPort) && rawPort >= 1 && rawPort <= 65535) {
     try {
-      healthServer = await startHealthServer(rawPort);
+      healthServer = createMiniAppServer({ config, logger, prisma: () => database.prisma, isReady: () => ready, botUsername: () => botUsername });
+      await listenMiniApp(healthServer, rawPort);
+      logger.info({ port: rawPort }, "Iris Mini App and API server listening");
     } catch (error) {
       console.warn(
         "Could not bind health check server on PORT:",
@@ -62,19 +38,12 @@ async function main(): Promise<void> {
     }
   }
 
-  const config = loadConfig();
-  const logger = createLogger(config);
-  if (healthServer && config.port) {
-    logger.info({ port: config.port }, "Health check HTTP server ready");
-  }
-
-  const database = createDatabase(config.databaseUrl, config.databasePoolSize, logger);
-  const bot = createBot({ config, database, logger });
   let stopping = false;
 
   const shutdown = async (signal: string, exitCode = 0): Promise<void> => {
     if (stopping) return;
     stopping = true;
+    ready = false;
     logger.info({ signal }, "Graceful shutdown started");
     await Promise.resolve(bot.stop()).catch((error: unknown) => {
       logger.warn({ err: error }, "Error while stopping bot polling");
@@ -115,6 +84,7 @@ async function main(): Promise<void> {
     }
 
     const me = await bot.api.getMe();
+    botUsername = me.username;
 
     try {
       await bot.api.deleteWebhook({ drop_pending_updates: false });
@@ -122,7 +92,7 @@ async function main(): Promise<void> {
       logger.warn({ err: error }, "Could not delete existing webhook before polling");
     }
 
-    await registerCommandMenus(bot.api, config.ownerId, logger);
+    await registerCommandMenus(bot.api, config.ownerId, logger, config.miniAppUrl);
 
     logger.info({ username: me.username, ownerId: config.ownerId.toString() }, "Iris bot connected");
 
@@ -130,10 +100,15 @@ async function main(): Promise<void> {
       try {
         await bot.start({
           allowed_updates: ["message", "callback_query"],
-          onStart: () => logger.info("Long polling started"),
+          onStart: () => {
+            ready = !stopping;
+            logger.info("Long polling started");
+          },
         });
+        ready = false;
         break;
       } catch (error) {
+        ready = false;
         if (stopping) break;
         if (error instanceof GrammyError && error.error_code === 409) {
           logger.warn(

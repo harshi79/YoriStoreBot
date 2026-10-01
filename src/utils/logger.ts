@@ -10,7 +10,7 @@ export function createLogger(config: AppConfig) {
       environment: config.nodeEnv,
     },
     redact: {
-      paths: ["*.botToken", "*.token", "*.password", "*.payload"],
+      paths: ["*.botToken", "*.token", "*.password", "*.payload", "*.initData", "*.sessionToken", "*.authorization"],
       censor: "[REDACTED]",
     },
   });

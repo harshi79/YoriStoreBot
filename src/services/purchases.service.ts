@@ -16,12 +16,62 @@ export interface PurchaseResult {
   paid: number;
   remainingCredits: number;
   payload: string;
-  payloads?: string[];
-  quantity?: number;
+  payloads: string[];
+  quantity: number;
   repeated: boolean;
   planDetails?: string;
   deliveryInstructions?: string;
   warrantyHours?: number;
+}
+
+async function getPurchaseReplay(
+  database: Pick<PrismaClient, "purchase">,
+  userId: string,
+  productId: string,
+  idempotencyKey: string,
+): Promise<PurchaseResult | null> {
+  const existing = await database.purchase.findUnique({
+    where: { idempotencyKey },
+    include: { product: true, buyer: { select: { credits: true } } },
+  });
+  if (!existing) return null;
+  if (existing.buyerId !== userId) throw new ValidationError("This purchase request is not yours.");
+  if (existing.productId !== productId || existing.batchIndex !== 0) {
+    throw new ValidationError("This purchase request is for a different checkout. Open the product again.");
+  }
+
+  const items = await database.purchase.findMany({
+    where: { batchId: existing.batchId },
+    orderBy: { batchIndex: "asc" },
+    select: {
+      id: true,
+      buyerId: true,
+      productId: true,
+      batchIndex: true,
+      amountPaid: true,
+      inventoryItem: { select: { payload: true } },
+    },
+  });
+  if (items[0]?.id !== existing.id || items.some((item, index) =>
+    item.buyerId !== userId || item.productId !== productId || item.batchIndex !== index)) {
+    throw new Error("Purchase batch is incomplete or inconsistent.");
+  }
+
+  const payloads = items.map((item) => item.inventoryItem.payload);
+  return {
+    purchaseId: existing.id,
+    productName: existing.product.name,
+    productEmoji: existing.product.emoji,
+    paid: items.reduce((total, item) => total + item.amountPaid, 0),
+    remainingCredits: existing.buyer.credits,
+    payload: payloads.join("\n"),
+    payloads,
+    quantity: items.length,
+    repeated: true,
+    planDetails: existing.product.planDetails,
+    deliveryInstructions: existing.product.deliveryInstructions,
+    warrantyHours: existing.product.warrantyHours,
+  };
 }
 
 export async function purchaseProduct(
@@ -44,27 +94,13 @@ export async function purchaseProduct(
   }
 
   const execute = () => prisma.$transaction(async (tx) => {
-    const existing = await tx.purchase.findUnique({
-      where: { idempotencyKey },
-      include: { inventoryItem: true, product: true, buyer: { select: { id: true, credits: true } } },
-    });
-    if (existing) {
-      if (existing.buyerId !== userId) throw new ValidationError("This purchase request is not yours.");
-      return {
-        purchaseId: existing.id,
-        productName: existing.product.name,
-        productEmoji: existing.product.emoji,
-        paid: existing.amountPaid,
-        remainingCredits: existing.buyer.credits,
-        payload: existing.inventoryItem.payload,
-        payloads: [existing.inventoryItem.payload],
-        quantity: 1,
-        repeated: true,
-        planDetails: existing.product.planDetails,
-        deliveryInstructions: existing.product.deliveryInstructions,
-        warrantyHours: existing.product.warrantyHours,
-      };
-    }
+    // Serialize duplicate requests in PostgreSQL, including retries from another
+    // process. A retry waits for the original checkout instead of reserving more stock.
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtextextended('iris-purchase:' || ${idempotencyKey}, 0))
+    `;
+    const replay = await getPurchaseReplay(tx, userId, productId, idempotencyKey);
+    if (replay) return replay;
 
     if (expectedPrice !== undefined) {
       const lockedProduct = await tx.$queryRaw<Array<{ price: number }>>`
@@ -155,22 +191,25 @@ export async function purchaseProduct(
     if (!debited.count) throw new InsufficientCreditsError();
     const updatedUser = await tx.user.findUniqueOrThrow({ where: { id: userId } });
 
-    let firstPurchaseId = "";
+    const firstPurchaseId = randomUUID();
     for (let i = 0; i < assignedItems.length; i++) {
       const item = assignedItems[i]!;
-      const key = i === 0 ? idempotencyKey : `${idempotencyKey}:${i}`.slice(0, 128);
-      const purchase = await tx.purchase.create({
+      const purchaseId = i === 0 ? firstPurchaseId : randomUUID();
+      // Internal item keys cannot collide through truncation of a long request key.
+      const key = i === 0 ? idempotencyKey : `item:${purchaseId}`;
+      await tx.purchase.create({
         data: {
-          id: randomUUID(),
+          id: purchaseId,
           buyerId: userId,
           productId,
           inventoryItemId: item.id,
           amountPaid: product.price,
           idempotencyKey: key,
+          batchId: firstPurchaseId,
+          batchIndex: i,
           createdAt: now,
         },
       });
-      if (i === 0) firstPurchaseId = purchase.id;
     }
 
     await tx.creditTransaction.create({
@@ -206,26 +245,10 @@ export async function purchaseProduct(
   try {
     return await execute();
   } catch (error) {
-    // If Telegram retries a callback after the first transaction committed, return the same delivery.
-    const existing = await prisma.purchase.findUnique({
-      where: { idempotencyKey },
-      include: { inventoryItem: true, product: true, buyer: { select: { id: true, credits: true } } },
-    });
-    if (existing && existing.buyerId === userId) {
-      return {
-        purchaseId: existing.id,
-        productName: existing.product.name,
-        productEmoji: existing.product.emoji,
-        paid: existing.amountPaid,
-        remainingCredits: existing.buyer.credits,
-        payload: existing.inventoryItem.payload,
-        repeated: true,
-        planDetails: existing.product.planDetails,
-        deliveryInstructions: existing.product.deliveryInstructions,
-        warrantyHours: existing.product.warrantyHours,
-      };
-    }
-    if (existing) throw new ValidationError("This purchase request is not yours.");
+    // Recover the whole committed delivery after a lost response or a transaction
+    // race, using the same replay path as a normal retry. Never charge a second time.
+    const replay = await getPurchaseReplay(prisma, userId, productId, idempotencyKey);
+    if (replay) return replay;
     throw error;
   }
 }

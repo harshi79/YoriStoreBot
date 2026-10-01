@@ -5,6 +5,7 @@ import type { AppLogger } from "../utils/logger.js";
 /** Commands shown in every private chat. Owner operations stay out of the public menu. */
 export const PUBLIC_COMMANDS = [
   { command: "start", description: "Open the Iris store" },
+  { command: "app", description: "Open your Iris Mini App" },
   { command: "store", description: "Browse categories and products" },
   { command: "search", description: "Search the product catalog" },
   { command: "profile", description: "View your profile and credits" },
@@ -23,7 +24,7 @@ export const COMMAND_MENU = [
   { command: "admin", description: "Open the owner panel (owner only)" },
 ] as const satisfies readonly BotCommand[];
 
-type CommandMenuApi = Pick<Api, "setMyCommands">;
+type CommandMenuApi = Pick<Api, "setMyCommands"> & Partial<Pick<Api, "setChatMenuButton">>;
 
 /**
  * Synchronize the default, all-private, and owner-chat scopes. Telegram keeps
@@ -34,6 +35,7 @@ export async function registerCommandMenus(
   api: CommandMenuApi,
   ownerId: bigint,
   logger: AppLogger,
+  miniAppUrl?: string,
 ): Promise<void> {
   try {
     await api.setMyCommands([...COMMAND_MENU], {
@@ -61,4 +63,12 @@ export async function registerCommandMenus(
       "Could not synchronize the owner command menu yet (the owner may not have started a chat with the bot)",
     );
   }
+  if (miniAppUrl && api.setChatMenuButton) {
+    try {
+      await api.setChatMenuButton({ menu_button: { type: "web_app", text: "Open Iris", web_app: { url: miniAppUrl } } });
+    } catch (error) {
+      logger.warn({ err: error }, "Could not register the Mini App menu button");
+    }
+  }
+
 }

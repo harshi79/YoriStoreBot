@@ -8,9 +8,18 @@ import type { PoolConfig } from "pg";
 import { PrismaPGlite } from "pglite-prisma-adapter";
 import { PrismaClient } from "../generated/prisma/client.js";
 import type { AppLogger } from "../utils/logger.js";
+import type { AppConfig } from "../config/env.js";
 
 const INIT_MIGRATION_PATH = fileURLToPath(
   new URL("../../prisma/migrations/20260930000000_init/migration.sql", import.meta.url),
+);
+
+const PURCHASE_BATCH_MIGRATION_PATH = fileURLToPath(
+  new URL("../../prisma/migrations/20261002000000_purchase_batches/migration.sql", import.meta.url),
+);
+
+const WISHLIST_MIGRATION_PATH = fileURLToPath(
+  new URL("../../prisma/migrations/20261002010000_mini_app_wishlist/migration.sql", import.meta.url),
 );
 
 const MANAGED_SSL_HOST_SUFFIXES = [
@@ -31,14 +40,13 @@ export interface DatabaseHandle {
 function buildPoolConfig(
   databaseUrl: string,
   poolSize: number,
-  forceDisableSsl = false,
 ): PoolConfig {
   const url = new URL(databaseUrl);
   const sslMode = url.searchParams.get("sslmode")?.toLowerCase();
   const hostname = url.hostname.toLowerCase();
 
   let ssl: PoolConfig["ssl"] | undefined;
-  if (forceDisableSsl || sslMode === "disable") {
+  if (sslMode === "disable") {
     url.searchParams.delete("sslmode");
     url.searchParams.delete("uselibpqcompat");
     ssl = false;
@@ -64,34 +72,37 @@ function buildPoolConfig(
   };
 }
 
-function isLocalhostUrl(databaseUrl: string): boolean {
-  try {
-    const hostname = new URL(databaseUrl).hostname.toLowerCase();
-    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
-  } catch {
-    return false;
-  }
-}
-
-async function createEmbeddedPGliteHandle(logger: AppLogger): Promise<{
+async function createEmbeddedPGliteHandle(
+  logger: AppLogger,
+  environment: AppConfig["nodeEnv"],
+  embeddedDataDir?: string,
+): Promise<{
   prisma: PrismaClient;
   close: () => Promise<void>;
 }> {
+  if (environment === "production") {
+    throw new Error("Embedded storage is not allowed in production. Configure DATABASE_URL.");
+  }
+
   let pg: PGlite;
-  if (process.env.NODE_ENV === "test") {
+  if (environment === "test") {
     pg = new PGlite();
     await pg.waitReady;
   } else {
-    const dataDir = path.resolve(process.cwd(), ".pglite", "iris");
+    const dataDir = embeddedDataDir ?? path.resolve(process.cwd(), ".pglite", "iris");
+    let persistentPg: PGlite | undefined;
     try {
       await mkdir(path.dirname(dataDir), { recursive: true });
-      pg = new PGlite(dataDir);
-      await pg.waitReady;
-      logger.info({ dataDir }, "Initialized persistent embedded PGlite database");
+      persistentPg = new PGlite(dataDir);
+      await persistentPg.waitReady;
+      pg = persistentPg;
+      logger.info({ dataDir }, "Initialized persistent development PGlite database");
     } catch (error) {
-      logger.warn({ err: error }, "Falling back to in-memory PGlite database");
-      pg = new PGlite();
-      await pg.waitReady;
+      await persistentPg?.close().catch(() => undefined);
+      throw new Error(
+        "Could not initialize persistent development storage. Refusing to use an in-memory database.",
+        { cause: error },
+      );
     }
   }
 
@@ -108,9 +119,10 @@ async function createEmbeddedPGliteHandle(logger: AppLogger): Promise<{
   return {
     prisma,
     async close() {
-      await prisma.$disconnect();
-      if (!pg.closed) {
-        await pg.close();
+      try {
+        await prisma.$disconnect();
+      } finally {
+        if (!pg.closed) await pg.close();
       }
     },
   };
@@ -119,7 +131,19 @@ async function createEmbeddedPGliteHandle(logger: AppLogger): Promise<{
 export async function ensureDatabaseSchema(
   prisma: PrismaClient,
   logger: AppLogger,
+  environment: AppConfig["nodeEnv"] = "production",
 ): Promise<void> {
+  if (environment === "production") {
+    // Production schema changes belong in the deployment step, never in bot startup.
+    try {
+      await prisma.$queryRaw`SELECT batch_id, batch_index FROM purchases LIMIT 0`;
+      await prisma.$queryRaw`SELECT id FROM wishlist_items LIMIT 0`;
+    } catch (error) {
+      throw new Error("Database schema is not ready. Run npm run db:deploy before starting Iris.", { cause: error });
+    }
+    return;
+  }
+
   const existing = await prisma.$queryRaw<Array<{ reg: string | null }>>`
     SELECT to_regclass('public.reset_challenges')::text AS reg
   `;
@@ -147,7 +171,6 @@ export async function ensureDatabaseSchema(
       }
     }
     logger.info("Initial database schema migration applied");
-    return;
   }
 
   // Ensure any new v2 columns/tables exist on an already-initialized database
@@ -175,11 +198,36 @@ export async function ensureDatabaseSchema(
     `DO $$ BEGIN ALTER TABLE "users" ADD CONSTRAINT "users_referred_by_id_fkey" FOREIGN KEY ("referred_by_id") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
   ];
   for (const statement of upgradeStatements) {
-    try {
-      await prisma.$executeRawUnsafe(statement);
-    } catch {
-      // Ignore if already applied
-    }
+    // These statements are already idempotent. Any other error must stop startup.
+    await prisma.$executeRawUnsafe(statement);
+  }
+
+  const batchColumns = await prisma.$queryRaw<Array<{ count: bigint }>>`
+    SELECT COUNT(*) AS count
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'purchases'
+      AND column_name IN ('batch_id', 'batch_index')
+  `;
+  if (Number(batchColumns[0]?.count) !== 2) {
+    const sql = await readFile(PURCHASE_BATCH_MIGRATION_PATH, "utf8");
+    const statements = sql.split(";").map((statement) => statement.trim())
+      .filter((statement) => statement && statement !== "BEGIN" && statement !== "COMMIT");
+    await prisma.$transaction(async (tx) => {
+      for (const statement of statements) await tx.$executeRawUnsafe(statement);
+    }, { maxWait: 5_000, timeout: 15_000 });
+    logger.info("Purchase batch migration applied to development/test database");
+  }
+  const wishlist = await prisma.$queryRaw<Array<{ reg: string | null }>>`
+    SELECT to_regclass('public.wishlist_items')::text AS reg
+  `;
+  if (!wishlist[0]?.reg) {
+    const sql = await readFile(WISHLIST_MIGRATION_PATH, "utf8");
+    const statements = sql.split(";").map((statement) => statement.trim())
+      .filter((statement) => statement && statement !== "BEGIN" && statement !== "COMMIT");
+    await prisma.$transaction(async (tx) => {
+      for (const statement of statements) await tx.$executeRawUnsafe(statement);
+    }, { maxWait: 5_000, timeout: 15_000 });
+    logger.info("Wishlist migration applied to development/test database");
   }
 }
 
@@ -187,9 +235,8 @@ function createPgPoolHandle(
   databaseUrl: string,
   poolSize: number,
   logger: AppLogger,
-  forceDisableSsl = false,
 ): { prisma: PrismaClient; close: () => Promise<void> } {
-  const pool = new Pool(buildPoolConfig(databaseUrl, poolSize, forceDisableSsl));
+  const pool = new Pool(buildPoolConfig(databaseUrl, poolSize));
   pool.on("error", (error) => logger.error({ err: error }, "Idle PostgreSQL connection error"));
 
   const prisma = new PrismaClient({
@@ -205,8 +252,11 @@ function createPgPoolHandle(
   return {
     prisma,
     async close() {
-      await prisma.$disconnect();
-      await pool.end();
+      try {
+        await prisma.$disconnect();
+      } finally {
+        await pool.end();
+      }
     },
   };
 }
@@ -215,60 +265,66 @@ export function createDatabase(
   databaseUrl: string,
   poolSize: number,
   logger: AppLogger,
+  environment: AppConfig["nodeEnv"] = "production",
+  embeddedDataDir?: string,
 ): DatabaseHandle {
-  let activeHandle: { prisma: PrismaClient; close: () => Promise<void> } | null =
-    databaseUrl ? createPgPoolHandle(databaseUrl, poolSize, logger) : null;
+  databaseUrl = databaseUrl.trim();
+  if (environment === "production" && !databaseUrl) {
+    throw new Error("DATABASE_URL is required in production. Embedded or in-memory storage is not allowed.");
+  }
+
+  let activeHandle: { prisma: PrismaClient; close: () => Promise<void> } | null = null;
+  let initialized = false;
+  let initialization: Promise<void> | null = null;
+  let lifecycleVersion = 0;
 
   const handle: DatabaseHandle = {
     get prisma(): PrismaClient {
-      if (!activeHandle) {
+      if (!activeHandle || !initialized) {
         throw new Error("Database has not been initialized yet");
       }
       return activeHandle.prisma;
     },
     async init() {
-      if (!databaseUrl) {
-        logger.warn("DATABASE_URL is not set; using embedded PGlite database");
-        activeHandle = await createEmbeddedPGliteHandle(logger);
-        await activeHandle.prisma.$connect();
-        await ensureDatabaseSchema(activeHandle.prisma, logger);
-        return;
-      }
-
-      if (!activeHandle) {
-        activeHandle = createPgPoolHandle(databaseUrl, poolSize, logger);
-      }
-
-      try {
-        await activeHandle.prisma.$connect();
-        await activeHandle.prisma.$queryRaw`SELECT 1`;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (message.includes("The server does not support SSL connections")) {
-          logger.warn("PostgreSQL server does not support SSL; reconnecting without SSL");
-          await activeHandle.close().catch(() => undefined);
-          activeHandle = createPgPoolHandle(databaseUrl, poolSize, logger, true);
-          await activeHandle.prisma.$connect();
-          await activeHandle.prisma.$queryRaw`SELECT 1`;
-        } else if (isLocalhostUrl(databaseUrl)) {
-          logger.warn(
-            { err: error },
-            "Local PostgreSQL is unreachable; falling back to embedded PGlite database",
-          );
-          await activeHandle.close().catch(() => undefined);
-          activeHandle = await createEmbeddedPGliteHandle(logger);
-          await activeHandle.prisma.$connect();
-        } else {
+      if (initialized) return;
+      if (initialization) return initialization;
+      initialization = (async () => {
+        const openingVersion = lifecycleVersion;
+        try {
+          if (!databaseUrl) logger.warn("DATABASE_URL is not set; using development/test PGlite storage");
+          const openingHandle = databaseUrl
+            ? createPgPoolHandle(databaseUrl, poolSize, logger)
+            : await createEmbeddedPGliteHandle(logger, environment, embeddedDataDir);
+          if (openingVersion !== lifecycleVersion) {
+            await openingHandle.close();
+            throw new Error("Database initialization was cancelled");
+          }
+          activeHandle = openingHandle;
+          await openingHandle.prisma.$connect();
+          await openingHandle.prisma.$queryRaw`SELECT 1`;
+          await ensureDatabaseSchema(openingHandle.prisma, logger, environment);
+          if (activeHandle !== openingHandle) throw new Error("Database initialization was cancelled");
+          initialized = true;
+        } catch (error) {
+          // Never switch databases (or silently disable SSL) after a configured connection fails.
+          await handle.close().catch((closeError: unknown) => {
+            logger.warn({ err: closeError }, "Could not close database after initialization failed");
+          });
           throw error;
         }
+      })();
+      try {
+        await initialization;
+      } finally {
+        initialization = null;
       }
-
-      await ensureDatabaseSchema(activeHandle.prisma, logger);
     },
     async close() {
-      if (activeHandle) {
-        await activeHandle.close();
-      }
+      lifecycleVersion += 1;
+      const closingHandle = activeHandle;
+      activeHandle = null;
+      initialized = false;
+      if (closingHandle) await closingHandle.close();
     },
   };
 

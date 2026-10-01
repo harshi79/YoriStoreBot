@@ -1,5 +1,5 @@
 CREATE TYPE "InventoryStatus" AS ENUM ('AVAILABLE', 'SOLD', 'REMOVED');
-CREATE TYPE "CreditTransactionType" AS ENUM ('BONUS', 'GIFT', 'GIFT_ALL', 'REDEEM', 'PURCHASE', 'REFUND', 'ADMIN_ADJUSTMENT');
+CREATE TYPE "CreditTransactionType" AS ENUM ('BONUS', 'GIFT', 'GIFT_ALL', 'REDEEM', 'PURCHASE', 'REFUND', 'ADMIN_ADJUSTMENT', 'REFERRAL');
 CREATE TYPE "WarrantyClaimStatus" AS ENUM ('PENDING', 'REPLACED', 'REFUNDED', 'REJECTED');
 
 CREATE TABLE "users" (
@@ -15,6 +15,10 @@ CREATE TABLE "users" (
     "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ(6) NOT NULL,
     "is_blocked" BOOLEAN NOT NULL DEFAULT false,
+    "referred_by_id" TEXT,
+    "referred_at" TIMESTAMPTZ(6),
+    "referral_reward_credits" INTEGER NOT NULL DEFAULT 0,
+    "referral_welcome_credits" INTEGER NOT NULL DEFAULT 0,
     CONSTRAINT "users_pkey" PRIMARY KEY ("id")
 );
 
@@ -160,6 +164,7 @@ CREATE TABLE "app_settings" (
 CREATE UNIQUE INDEX "users_telegram_id_key" ON "users"("telegram_id");
 CREATE INDEX "users_last_active_at_idx" ON "users"("last_active_at");
 CREATE INDEX "users_created_at_idx" ON "users"("created_at");
+CREATE INDEX "users_referred_by_id_referred_at_idx" ON "users"("referred_by_id", "referred_at");
 CREATE UNIQUE INDEX "categories_name_key" ON "categories"("name");
 CREATE INDEX "categories_enabled_display_order_idx" ON "categories"("enabled", "display_order");
 CREATE UNIQUE INDEX "products_category_id_name_key" ON "products"("category_id", "name");
@@ -187,6 +192,8 @@ CREATE UNIQUE INDEX "reset_challenges_token_hash_key" ON "reset_challenges"("tok
 CREATE INDEX "reset_challenges_expires_at_used_at_idx" ON "reset_challenges"("expires_at", "used_at");
 CREATE INDEX "admin_audit_created_at_idx" ON "admin_audit"("created_at");
 
+ALTER TABLE "users" ADD CONSTRAINT "users_referred_by_id_fkey"
+FOREIGN KEY ("referred_by_id") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 ALTER TABLE "products" ADD CONSTRAINT "products_category_id_fkey"
 FOREIGN KEY ("category_id") REFERENCES "categories"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "inventory_items" ADD CONSTRAINT "inventory_items_product_id_fkey"

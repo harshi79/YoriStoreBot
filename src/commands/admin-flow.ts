@@ -16,7 +16,7 @@ import {
 } from "../services/store.service.js";
 import { submitWarrantyClaim } from "../services/purchases.service.js";
 import { findUserByTelegramId } from "../services/users.service.js";
-import { updateBonusSettings } from "../services/settings.service.js";
+import { updateBonusSettings, updateReferralSettings } from "../services/settings.service.js";
 import { showProductAdmin } from "../bot/admin-views.js";
 import { showOrderDetail, showStoreSearchResults } from "../bot/views.js";
 import { creditLabel, escapeHtml, smallCaps } from "../utils/format.js";
@@ -428,6 +428,23 @@ export function registerAdminFlow(bot: Bot<BotContext>, deps: BotDependencies): 
           await updateBonusSettings(deps.database.prisma, { credits, periodHours });
           ctx.session.adminFlow = null;
           await showFlowPanel(ctx, deps, `✅ ${smallCaps("Daily bonus updated:")} <b>${credits} ${smallCaps("credits")}</b> ${smallCaps("every")} <b>${periodHours} ${smallCaps("hours")}</b>.`, new InlineKeyboard().text(smallCaps("⚙️ SETTINGS"), "admin:settings").text(smallCaps("◀ ADMIN"), "admin:panel"));
+          break;
+        }
+        case "settings:referral": {
+          const parts = text.split(/\s+/).filter(Boolean);
+          if (parts.length !== 2) {
+            throw new ValidationError("Send two whole numbers: referrer credits and friend welcome bonus (for example: 10 5).");
+          }
+          const referrerCredits = parseWholeNumber(parts[0] ?? "", "Referrer reward credits", 0, 1_000_000);
+          const inviteeCredits = parseWholeNumber(parts[1] ?? "", "Friend welcome bonus", 0, 1_000_000);
+          await updateReferralSettings(deps.database.prisma, { referrerCredits, inviteeCredits });
+          ctx.session.adminFlow = null;
+          await showFlowPanel(
+            ctx,
+            deps,
+            `✅ ${smallCaps("Referral rewards updated:")} <b>+${referrerCredits} ${smallCaps("credits")}</b> ${smallCaps("to referrer")} · <b>+${inviteeCredits} ${smallCaps("credits")}</b> ${smallCaps("friend welcome bonus")}.`,
+            new InlineKeyboard().text(smallCaps("⚙️ SETTINGS"), "admin:settings").text(smallCaps("◀ ADMIN"), "admin:panel"),
+          );
           break;
         }
         case "broadcast:message": {

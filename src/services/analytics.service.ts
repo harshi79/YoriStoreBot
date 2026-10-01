@@ -1,9 +1,10 @@
 import type { PrismaClient } from "../generated/prisma/client.js";
 
 export async function getStoreStatistics(prisma: PrismaClient) {
-  const [timeRows, users, active24h, active72h, products, inventory, purchases, creditTotals, recentPurchases] = await Promise.all([
+  const [timeRows, users, referrals, active24h, active72h, products, inventory, purchases, creditTotals, recentPurchases] = await Promise.all([
     prisma.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`,
     prisma.user.count(),
+    prisma.user.count({ where: { referredById: { not: null } } }),
     prisma.$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(*)::bigint AS count FROM users WHERE last_active_at >= NOW() - INTERVAL '24 hours'`,
     prisma.$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(*)::bigint AS count FROM users WHERE last_active_at >= NOW() - INTERVAL '72 hours'`,
     prisma.product.count({ where: { deletedAt: null } }),
@@ -20,7 +21,7 @@ export async function getStoreStatistics(prisma: PrismaClient) {
     }),
   ]);
 
-  const issuedTypes = new Set(["BONUS", "GIFT", "GIFT_ALL", "REDEEM", "REFUND", "ADMIN_ADJUSTMENT"]);
+  const issuedTypes = new Set(["BONUS", "GIFT", "GIFT_ALL", "REDEEM", "REFUND", "ADMIN_ADJUSTMENT", "REFERRAL"]);
   const totals = new Map(creditTotals.map((row) => [row.type, row._sum.amount ?? 0]));
   const creditsIssued = [...totals.entries()]
     .filter(([type]) => issuedTypes.has(type))
@@ -29,6 +30,7 @@ export async function getStoreStatistics(prisma: PrismaClient) {
   return {
     now: timeRows[0]?.now ?? new Date(),
     users,
+    referrals,
     active24h: Number(active24h[0]?.count ?? 0n),
     active72h: Number(active72h[0]?.count ?? 0n),
     products,

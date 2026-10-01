@@ -23,7 +23,11 @@ export function createBot(deps: BotDependencies): Bot<BotContext> {
   bot.use(createRateLimitMiddleware());
   bot.use(async (ctx, next) => {
     if (ctx.from && ctx.chat?.type === "private") {
-      await touchUser(deps.database.prisma, ctx.from);
+      const text = ctx.message?.text?.trim() ?? "";
+      const isStartCommand = /^\/start(?:@\w+)?(?:\s+|$)/i.test(text);
+      if (!isStartCommand) {
+        await touchUser(deps.database.prisma, ctx.from);
+      }
     }
     await next();
   });

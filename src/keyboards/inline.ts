@@ -8,12 +8,13 @@ export function mainKeyboard(): InlineKeyboard {
     .text(smallCaps("🛍 Browse store"), "nav:store")
     .text(smallCaps("🎁 Daily bonus"), "nav:bonus")
     .row()
+    .text(smallCaps("🤝 Refer & earn"), "nav:refer")
     .text(smallCaps("📦 My orders"), "nav:orders")
+    .row()
     .text(smallCaps("👤 Profile"), "nav:profile")
-    .row()
     .text(smallCaps("💳 Wallet"), "nav:wallet")
-    .text(smallCaps("ℹ️ Help"), "nav:help")
     .row()
+    .text(smallCaps("ℹ️ Help"), "nav:help")
     .url(smallCaps("👑 Contact support"), "https://t.me/YoriNetwork");
 }
 
@@ -23,8 +24,9 @@ export function profileKeyboard(): InlineKeyboard {
     .text(smallCaps("💳 Wallet"), "nav:wallet")
     .row()
     .text(smallCaps("🎁 Bonus"), "nav:bonus")
-    .text(smallCaps("📦 Orders"), "nav:orders")
+    .text(smallCaps("🤝 Refer & earn"), "nav:refer")
     .row()
+    .text(smallCaps("📦 Orders"), "nav:orders")
     .text(smallCaps("◀ Main menu"), "nav:home");
 }
 

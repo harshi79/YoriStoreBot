@@ -267,11 +267,14 @@ export function richHomeMessage(firstName: string | null | undefined): InputRich
         richCallbackButton("🛍 Browse store", "nav:store", "primary"),
         richCallbackButton("🎁 Daily bonus", "nav:bonus", "success"),
       ]),
+      richButtonRow([
+        richCallbackButton("🤝 Refer & earn", "nav:refer"),
+        richCallbackButton("📦 My orders", "nav:orders"),
+      ]),
       richHeading("YOUR ACCOUNT", 4),
       richButtonRow([
         richCallbackButton("👤 Profile", "nav:profile"),
         richCallbackButton("💳 Wallet", "nav:wallet"),
-        richCallbackButton("📦 My orders", "nav:orders"),
       ]),
       richButtonRow([
         richCallbackButton("ℹ️ Help & commands", "nav:help", "link"),
@@ -292,6 +295,7 @@ export function richHelpMessage(): InputRichMessage {
     ["/profile", "View your profile and credits"],
     ["/wallet", "Review your balance activity"],
     ["/bonus", "Claim credits when ready"],
+    ["/refer", "Invite friends and earn credits"],
     ["/redeem CODE", "Redeem a credit code"],
     ["/orders", "Open your delivery history"],
     ["/help", "Show this guide"],
@@ -309,6 +313,7 @@ export function richHelpMessage(): InputRichMessage {
         richCallbackButton("🎁 Daily bonus", "nav:bonus", "success"),
       ]),
       richButtonRow([
+        richCallbackButton("🤝 Refer & earn", "nav:refer"),
         { text: smallCaps("👑 Contact support"), url: "https://t.me/YoriNetwork" },
       ]),
     ],
@@ -321,6 +326,7 @@ export function welcomeMessage(firstName: string | null | undefined): string {
     `${smallCaps("Your private digital store for authorized goods, daily credits, and secure delivery.")}\n\n` +
     `🛍 ${smallCaps("Browse categories and featured items")}\n` +
     `🎁 ${smallCaps("Claim your daily credits")}\n` +
+    `🤝 ${smallCaps("Invite friends and earn referral credits")}\n` +
     `📦 ${smallCaps("Keep track of purchases and receipts")}\n\n` +
     `${smallCaps("Choose where to begin below.")}`;
 }
@@ -331,17 +337,23 @@ export function profileMessage(input: {
   telegramId: bigint;
   credits: number;
   purchaseCount: number;
+  referralCount?: number;
+  referralEarned?: number;
   createdAt: Date;
   lastActiveAt: Date;
   nextBonusAt: Date | null;
   bonusAvailable: boolean;
 }): string {
+  const referralLine = input.referralCount !== undefined
+    ? `🤝 <b>${smallCaps("Referrals")}:</b> ${input.referralCount}${input.referralEarned ? ` (+${creditLabel(input.referralEarned)})` : ""}\n`
+    : "";
   return `◈ <b>${smallCaps("Your Iris profile")}</b>\n\n` +
     `👤 <b>${smallCaps("Name")}:</b> ${escapeHtml(input.displayName)}\n` +
     `✦ <b>${smallCaps("Username")}:</b> ${input.username ? `@${escapeHtml(input.username)}` : smallCaps("Not set")}\n` +
     `🆔 <b>${smallCaps("Telegram ID")}:</b> <code>${input.telegramId.toString()}</code>\n` +
     `💳 <b>${smallCaps("Credits")}:</b> ${creditLabel(input.credits)}\n` +
     `📦 <b>${smallCaps("Purchases")}:</b> ${input.purchaseCount}\n` +
+    referralLine +
     `🗓 <b>${smallCaps("Joined")}:</b> ${escapeHtml(formatDate(input.createdAt))}\n` +
     `⏱ <b>${smallCaps("Last active")}:</b> ${escapeHtml(formatDate(input.lastActiveAt))}\n` +
     `🎁 <b>${smallCaps("Bonus")}:</b> ${input.bonusAvailable ? smallCaps("Ready to claim") : escapeHtml(formatDate(input.nextBonusAt))}`;
@@ -475,6 +487,7 @@ export function helpMessage(): string {
     `• /profile — view your profile and credits\n` +
     `• /wallet — review your credit activity\n` +
     `• /bonus — claim credits when ready\n` +
+    `• /refer — invite friends and earn credits\n` +
     `• /redeem CODE — redeem a credit code\n` +
     `• /orders — view deliveries and download receipts\n` +
     `• /help — show this guide\n` +

@@ -36,14 +36,17 @@ import {
   showFeaturedStore,
   showHelp,
   showHome,
+  showMyReferrals,
   showOrderDetail,
   showOrders,
+  showReferrals,
   showWallet,
   showProduct,
   showProfile,
   showStore,
   showWarrantyPrompt,
 } from "../bot/views.js";
+import { toggleReferralEnabled } from "../services/settings.service.js";
 import { editMessageRichOrLegacy, editOrReply, editOrReplyRich, replyRichOrLegacy, sendRichOrLegacy } from "../bot/render.js";
 import { beginAdminFlow, handleUserWarrantySubmission } from "../commands/admin-flow.js";
 import { beginReset, cancelReset, completeReset, continueReset, requestRestart, sendStoreExport } from "../commands/admin.js";
@@ -157,7 +160,11 @@ async function showPurchaseConfirmation(
   const backData = `store:product:${product.id}`;
   const keyboard = canAfford
     ? confirmPurchaseKeyboard(product.id, nonce, product.price, safeQty, maxAvailable)
-    : new InlineKeyboard().text(smallCaps("🎁 Claim bonus"), "nav:bonus").row().text(smallCaps("◀ Back to item"), backData);
+    : new InlineKeyboard()
+        .text(smallCaps("🎁 Claim bonus"), "nav:bonus")
+        .text(smallCaps("🤝 Refer & earn"), "nav:refer")
+        .row()
+        .text(smallCaps("◀ Back to item"), backData);
   const richActionRows: Array<Array<ReturnType<typeof richCallbackButton>>> = [];
   if (canAfford) {
     if (maxAvailable >= 2) {
@@ -176,6 +183,7 @@ async function showPurchaseConfirmation(
   } else {
     richActionRows.push([
       richCallbackButton("🎁 Claim daily bonus", "nav:bonus", "primary"),
+      richCallbackButton("🤝 Refer & earn", "nav:refer"),
       richCallbackButton("◀ Back to item", backData, "link"),
     ]);
   }
@@ -202,11 +210,15 @@ async function handleUserCallback(ctx: BotContext, deps: BotDependencies, data: 
   else if (data === "nav:profile") await showProfile(ctx, deps);
   else if (data === "nav:wallet") await showWallet(ctx, deps);
   else if (data === "nav:bonus") await showBonusStatus(ctx, deps);
+  else if (data === "nav:refer") await showReferrals(ctx, deps);
   else if (data === "nav:orders") await showOrders(ctx, deps);
   else if (data === "nav:help") await showHelp(ctx, deps);
   else if (data === "bonus:claim") await claimBonus(ctx, deps, true);
   else if (data === "noop") return true;
-  else if (data.startsWith("orders:page:")) {
+  else if (data.startsWith("refer:list:")) {
+    const page = Number(data.split(":")[2] ?? 0);
+    await showMyReferrals(ctx, deps, page);
+  } else if (data.startsWith("orders:page:")) {
     const page = Number(data.split(":")[2] ?? 0);
     await showOrders(ctx, deps, page);
   } else if (data.startsWith("wallet:page:")) {
@@ -662,6 +674,19 @@ async function handleAdminCallback(
   else if (data === "admin:settings") await showSettings(ctx, deps);
   else if (data === "admin:settings:bonus") {
     await beginAdminFlow(ctx, deps, { kind: "settings:bonus" }, "🎁 Send bonus settings as: <code>CREDITS HOURS</code> (example: <code>25 24</code>). Existing claim timestamps remain unchanged.");
+  } else if (data === "admin:settings:referral") {
+    await beginAdminFlow(
+      ctx,
+      deps,
+      { kind: "settings:referral" },
+      "🤝 Send referral rewards as: <code>REFERRER_CREDITS WELCOME_CREDITS</code> (example: <code>10 5</code> for +10 to referrer and +5 to invited friend, or <code>15 0</code> for referrer-only).",
+    );
+  } else if (data === "admin:settings:referral:toggle") {
+    await toggleReferralEnabled(deps.database.prisma, {
+      referrerCredits: deps.config.referralRewardCredits,
+      inviteeCredits: deps.config.referralWelcomeCredits,
+    });
+    await showSettings(ctx, deps);
   } else if (data === "admin:broadcast") {
     await beginAdminFlow(ctx, deps, { kind: "broadcast:message" }, "📢 Send the plain-text broadcast now. It will be previewed before sending.");
   } else if (data === "admin:broadcast:cancel") {

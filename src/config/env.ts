@@ -34,6 +34,8 @@ const environmentSchema = z.object({
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
   BONUS_CREDITS: z.coerce.number().int().min(1).max(1_000_000).default(25),
   BONUS_PERIOD_HOURS: z.coerce.number().int().min(1).max(720).default(24),
+  REFERRAL_REWARD_CREDITS: z.coerce.number().int().min(0).max(1_000_000).default(10),
+  REFERRAL_WELCOME_CREDITS: z.coerce.number().int().min(0).max(1_000_000).default(5),
   DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(10),
   PM2_APP_NAME: z.string().optional().default(""),
   PORT: z.coerce.number().int().min(1).max(65535).optional(),
@@ -47,6 +49,8 @@ export interface AppConfig {
   logLevel: "trace" | "debug" | "info" | "warn" | "error" | "fatal";
   bonusCredits: number;
   bonusPeriodHours: number;
+  referralRewardCredits: number;
+  referralWelcomeCredits: number;
   databasePoolSize: number;
   pm2AppName: string;
   port?: number | undefined;
@@ -76,6 +80,8 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     LOG_LEVEL: rawLogLevel,
     BONUS_CREDITS: cleanOptionalString(source.BONUS_CREDITS),
     BONUS_PERIOD_HOURS: cleanOptionalString(source.BONUS_PERIOD_HOURS),
+    REFERRAL_REWARD_CREDITS: cleanOptionalString(source.REFERRAL_REWARD_CREDITS),
+    REFERRAL_WELCOME_CREDITS: cleanOptionalString(source.REFERRAL_WELCOME_CREDITS),
     DATABASE_POOL_SIZE: cleanOptionalString(source.DATABASE_POOL_SIZE),
     PM2_APP_NAME: cleanOptionalString(source.PM2_APP_NAME),
     PORT: cleanOptionalString(source.PORT),
@@ -96,6 +102,8 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     logLevel: parsed.data.LOG_LEVEL,
     bonusCredits: parsed.data.BONUS_CREDITS,
     bonusPeriodHours: parsed.data.BONUS_PERIOD_HOURS,
+    referralRewardCredits: parsed.data.REFERRAL_REWARD_CREDITS,
+    referralWelcomeCredits: parsed.data.REFERRAL_WELCOME_CREDITS,
     databasePoolSize: parsed.data.DATABASE_POOL_SIZE,
     pm2AppName: parsed.data.PM2_APP_NAME,
     port: parsed.data.PORT,

@@ -7,17 +7,20 @@ import {
   claimBonus,
   sendWelcomeVideo,
   showHelp,
+  showMyReferrals,
   showOrders,
   showProfile,
+  showReferrals,
   showWallet,
   showStore,
   showStoreSearchResults,
 } from "../bot/views.js";
 import { redeemCode } from "../services/codes.service.js";
+import { processReferralStart } from "../services/referrals.service.js";
 import { findUserByTelegramId } from "../services/users.service.js";
 import { mainKeyboard } from "../keyboards/inline.js";
 import { creditLabel, escapeHtml, smallCaps } from "../utils/format.js";
-import { editOrReplyRich, replyRichOrLegacy } from "../bot/render.js";
+import { editOrReplyRich, replyRichOrLegacy, sendRichOrLegacy } from "../bot/render.js";
 import { richButtonRow, richCallbackButton, richHeading, richKeyValueTable, richParagraph } from "../messages/rich-ui.js";
 import { AlreadyRedeemedError, CodeUnavailableError, DomainError } from "../utils/errors.js";
 
@@ -27,7 +30,113 @@ export function registerUserCommands(bot: Bot<BotContext>, deps: BotDependencies
     ctx.session.adminFlow = null;
     ctx.session.userFlow = null;
     ctx.session.purchaseConfirmation = null;
+    const rawPayload = ctx.match.trim();
+    const startResult = await processReferralStart(
+      deps.database.prisma,
+      ctx.from!,
+      rawPayload,
+      {
+        referrerCredits: deps.config.referralRewardCredits,
+        inviteeCredits: deps.config.referralWelcomeCredits,
+      },
+    );
     await sendWelcomeVideo(ctx, deps);
+
+    if (startResult.referralApplied && startResult.referrer) {
+      const referrerLabel = startResult.referrer.username
+        ? `@${startResult.referrer.username}`
+        : startResult.referrer.firstName || `User ${startResult.referrer.telegramId.toString()}`;
+      const welcomeBonusLine = startResult.inviteeCreditsAwarded > 0
+        ? `\n🎁 <b>${smallCaps("Welcome bonus")}:</b> +${creditLabel(startResult.inviteeCreditsAwarded)}\n💰 <b>${smallCaps("Your balance")}:</b> ${creditLabel(startResult.user.credits)}`
+        : "";
+      const inviteeText = `🤝 <b>${smallCaps("Referral linked")}</b>\n\n` +
+        `${smallCaps("You joined Iris via")} <b>${escapeHtml(referrerLabel)}</b>.` +
+        welcomeBonusLine;
+      await replyRichOrLegacy(
+        ctx,
+        {
+          blocks: [
+            richHeading("🤝 Welcome referral bonus", 1),
+            richKeyValueTable([
+              ["Invited by", referrerLabel],
+              ...(startResult.inviteeCreditsAwarded > 0
+                ? [
+                    ["Welcome bonus", `+${creditLabel(startResult.inviteeCreditsAwarded)}`],
+                    ["Your balance", creditLabel(startResult.user.credits)],
+                  ] as Array<[string, string]>
+                : []),
+            ], "Referral welcome"),
+            richButtonRow([
+              richCallbackButton("🛍 Browse store", "nav:store", "primary"),
+              richCallbackButton("🤝 Refer & earn", "nav:refer"),
+            ]),
+          ],
+        },
+        inviteeText,
+        { logger: deps.logger },
+      );
+
+      if (startResult.referrer.creditsAwarded > 0) {
+        const inviteeLabel = ctx.from?.username
+          ? `@${ctx.from.username}`
+          : ctx.from?.first_name || `User ${ctx.from!.id}`;
+        const referrerFallback = `🎉 <b>${smallCaps("New referral reward!")}</b>\n\n` +
+          `<b>${escapeHtml(inviteeLabel)}</b> ${smallCaps("joined Iris using your invite link.")}\n` +
+          `✦ +${creditLabel(startResult.referrer.creditsAwarded)}\n` +
+          `💰 <b>${smallCaps("New balance")}:</b> ${creditLabel(startResult.referrer.balanceAfter)}`;
+        await sendRichOrLegacy(
+          ctx,
+          Number(startResult.referrer.telegramId),
+          {
+            blocks: [
+              richHeading("🎉 New referral reward", 1),
+              richParagraph("A new friend joined Iris using your personal invite link!", true),
+              richKeyValueTable([
+                ["New friend", inviteeLabel],
+                ["Credits earned", `+${creditLabel(startResult.referrer.creditsAwarded)}`],
+                ["New balance", creditLabel(startResult.referrer.balanceAfter)],
+              ], "Referral reward"),
+              richButtonRow([
+                richCallbackButton("👥 My referrals", "refer:list:0", "primary"),
+                richCallbackButton("🤝 Refer & earn", "nav:refer"),
+              ]),
+            ],
+          },
+          referrerFallback,
+          { logger: deps.logger },
+        ).catch((err: unknown) => {
+          deps.logger.debug({ err, referrerTelegramId: startResult.referrer?.telegramId.toString() }, "Could not send referral notification to referrer");
+        });
+      }
+    } else if (rawPayload && /^(?:ref_|r_)/i.test(rawPayload)) {
+      if (startResult.referralIgnoreReason === "self_referral") {
+        await replyRichOrLegacy(
+          ctx,
+          {
+            blocks: [
+              richHeading("⚠️ Own referral link", 1),
+              richParagraph("You cannot use your own referral link. Share it with a friend to earn credits!", true),
+              richButtonRow([richCallbackButton("🤝 Refer & earn", "nav:refer", "primary")]),
+            ],
+          },
+          `⚠️ ${smallCaps("You cannot use your own referral link. Share it with a friend to earn credits!")}`,
+          { logger: deps.logger },
+        );
+      } else if (startResult.referralIgnoreReason === "already_registered") {
+        await replyRichOrLegacy(
+          ctx,
+          {
+            blocks: [
+              richHeading("ℹ️ Already registered", 1),
+              richParagraph("Referral links apply only when joining Iris for the first time. Invite your own friends to earn credits!", true),
+              richButtonRow([richCallbackButton("🤝 Refer & earn", "nav:refer", "primary")]),
+            ],
+          },
+          `ℹ️ ${smallCaps("Referral links apply only when joining Iris for the first time.")}`,
+          { logger: deps.logger },
+        );
+      }
+    }
   });
 
   bot.command("store", async (ctx) => {
@@ -74,6 +183,18 @@ export function registerUserCommands(bot: Bot<BotContext>, deps: BotDependencies
     if (!(await requirePrivate(ctx))) return;
     ctx.session.userFlow = null;
     await claimBonus(ctx, deps);
+  });
+
+  bot.command(["refer", "referrals"], async (ctx) => {
+    if (!(await requirePrivate(ctx))) return;
+    ctx.session.userFlow = null;
+    await showReferrals(ctx, deps);
+  });
+
+  bot.command("myreferrals", async (ctx) => {
+    if (!(await requirePrivate(ctx))) return;
+    ctx.session.userFlow = null;
+    await showMyReferrals(ctx, deps, 0);
   });
 
   bot.command("redeem", async (ctx) => {

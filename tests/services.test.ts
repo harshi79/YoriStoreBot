@@ -28,7 +28,20 @@ import { buildOrderReceiptText, parseDeliveryPayload } from "../src/utils/creden
 import { claimDailyBonus } from "../src/services/bonus.service.js";
 import { createRedeemCodes, redeemCode } from "../src/services/codes.service.js";
 import { changeCredits, giftAllActiveUsers, giftCredits, listUserCreditTransactions, MAX_CREDITS, removeCredits } from "../src/services/credits.service.js";
-import { updateBonusSettings, getBonusSettings } from "../src/services/settings.service.js";
+import {
+  buildReferralLink,
+  getUserReferralSummary,
+  listUserReferrals,
+  parseReferralStartPayload,
+  processReferralStart,
+} from "../src/services/referrals.service.js";
+import {
+  updateBonusSettings,
+  getBonusSettings,
+  getReferralSettings,
+  toggleReferralEnabled,
+  updateReferralSettings,
+} from "../src/services/settings.service.js";
 import { cancelResetChallenge, createResetChallenge, advanceResetChallenge, performConfirmedReset } from "../src/services/admin.service.js";
 import { buildStoreExport } from "../src/services/export.service.js";
 import { broadcastToUsers } from "../src/services/broadcast.service.js";
@@ -1378,4 +1391,141 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
     expect(await countAvailableInventory(prisma, unlimitedProduct.id)).toBe(1);
   });
 });
+
+describe("refer & earn, my referrals, and owner referral controls", () => {
+  it("builds and parses referral deep-link payloads safely", () => {
+    expect(buildReferralLink("iris_test_bot", 98_001n)).toBe("https://t.me/iris_test_bot?start=ref_98001");
+    expect(parseReferralStartPayload("ref_98001")).toBe(98_001n);
+    expect(parseReferralStartPayload("R_98001")).toBe(98_001n);
+    expect(parseReferralStartPayload("")).toBeNull();
+    expect(parseReferralStartPayload("ref_0")).toBeNull();
+    expect(parseReferralStartPayload("ref_abc")).toBeNull();
+  });
+
+  it("rewards both referrer and new friend on first /start and blocks self or repeat referrals", async () => {
+    const referrer = await makeUser(98_100n, 20);
+    await prisma.user.update({
+      where: { id: referrer.id },
+      data: { username: "inviter_pro", firstName: "Inviter" },
+    });
+
+    const { bot, calls } = makeTestBot();
+    const newFriendTelegramId = 98_101;
+    await bot.handleUpdate(privateMessageUpdate(newFriendTelegramId, `/start ref_${referrer.telegramId.toString()}`));
+
+    const updatedReferrer = await prisma.user.findUniqueOrThrow({ where: { id: referrer.id } });
+    const newFriend = await prisma.user.findUniqueOrThrow({ where: { telegramId: BigInt(newFriendTelegramId) } });
+
+    expect(updatedReferrer.credits).toBe(30); // 20 + 10 default referrer reward
+    expect(newFriend.credits).toBe(5); // +5 default welcome bonus
+    expect(newFriend.referredById).toBe(referrer.id);
+    expect(newFriend.referralRewardCredits).toBe(10);
+    expect(newFriend.referralWelcomeCredits).toBe(5);
+
+    const referralTx = await prisma.creditTransaction.findMany({
+      where: { type: "REFERRAL" },
+      orderBy: { amount: "asc" },
+    });
+    expect(referralTx).toHaveLength(2);
+    expect(referralTx[0]).toMatchObject({ userId: newFriend.id, amount: 5, balanceAfter: 5 });
+    expect(referralTx[1]).toMatchObject({ userId: referrer.id, amount: 10, balanceAfter: 30 });
+
+    // Referrer receives a direct Telegram notification
+    const referrerNotice = calls.find(
+      (call) =>
+        (call.method === "sendRichMessage" || call.method === "sendMessage") &&
+        Number(call.payload.chat_id) === Number(referrer.telegramId),
+    );
+    expect(referrerNotice).toBeDefined();
+    expect(JSON.stringify(referrerNotice?.payload)).toContain("10 ᴄʀᴇᴅɪᴛꜱ");
+
+    // Existing user cannot claim referral again
+    await bot.handleUpdate(privateMessageUpdate(newFriendTelegramId, `/start ref_${referrer.telegramId.toString()}`));
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: referrer.id } })).credits).toBe(30);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: newFriend.id } })).credits).toBe(5);
+
+    // Self-referral by a brand-new user is rejected
+    const selfUserTelegramId = 98_102;
+    const selfResult = await processReferralStart(
+      prisma,
+      { id: selfUserTelegramId, is_bot: false, first_name: "Self" },
+      `ref_${selfUserTelegramId}`,
+    );
+    expect(selfResult.referralApplied).toBe(false);
+    expect(selfResult.referralIgnoreReason).toBe("self_referral");
+    expect(selfResult.user.credits).toBe(0);
+  });
+
+  it("displays Refer & Earn and paginated My Referrals views and supports owner settings", async () => {
+    const referrer = await makeUser(98_200n, 50);
+    await updateReferralSettings(prisma, { referrerCredits: 15, inviteeCredits: 8 });
+    expect(await getReferralSettings(prisma)).toEqual({
+      enabled: true,
+      referrerCredits: 15,
+      inviteeCredits: 8,
+    });
+
+    for (let i = 1; i <= 9; i++) {
+      await processReferralStart(
+        prisma,
+        {
+          id: 98_200 + i,
+          is_bot: false,
+          first_name: `Friend ${i}`,
+          username: `friend_${i}`,
+        },
+        `ref_${referrer.telegramId.toString()}`,
+      );
+    }
+
+    const summary = await getUserReferralSummary(prisma, referrer.id);
+    expect(summary.totalReferrals).toBe(9);
+    expect(summary.totalEarned).toBe(135); // 9 * 15
+
+    const firstPage = await listUserReferrals(prisma, referrer.id, 0, 8);
+    expect(firstPage.total).toBe(9);
+    expect(firstPage.pages).toBe(2);
+    expect(firstPage.referrals).toHaveLength(8);
+
+    const { bot, calls } = makeTestBot();
+    await bot.handleUpdate(privateMessageUpdate(Number(referrer.telegramId), "/refer"));
+    const referScreen = calls.filter((call) => call.method === "sendRichMessage").at(-1);
+    const referRich = JSON.stringify(referScreen?.payload.rich_message);
+    expect(referRich).toContain("https://t.me/iris_test_bot?start=ref_98200");
+    expect(referRich).toContain("135 ᴄʀᴇᴅɪᴛꜱ");
+    expect(richCallbackData(referScreen?.payload.rich_message)).toContain("refer:list:0");
+
+    await bot.handleUpdate(privateCallbackUpdate(Number(referrer.telegramId), "refer:list:0"));
+    const listPage0 = calls.filter((call) => call.method === "editMessageText").at(-1);
+    const listPage0Rich = JSON.stringify(listPage0?.payload.rich_message);
+    expect(listPage0Rich).toContain("@friend_9");
+    expect(richCallbackData(listPage0?.payload.rich_message)).toContain("refer:list:1");
+
+    await bot.handleUpdate(privateCallbackUpdate(Number(referrer.telegramId), "refer:list:1"));
+    const listPage1 = calls.filter((call) => call.method === "editMessageText").at(-1);
+    expect(JSON.stringify(listPage1?.payload.rich_message)).toContain("@friend_1");
+
+    // Owner can toggle and update referral settings from the admin panel
+    await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), "admin:settings:referral:toggle"));
+    expect((await getReferralSettings(prisma)).enabled).toBe(false);
+
+    const whileDisabled = await processReferralStart(
+      prisma,
+      { id: 98_299, is_bot: false, first_name: "Latecomer" },
+      `ref_${referrer.telegramId.toString()}`,
+    );
+    expect(whileDisabled.referralApplied).toBe(false);
+    expect(whileDisabled.referralIgnoreReason).toBe("disabled");
+
+    await toggleReferralEnabled(prisma);
+    await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), "admin:settings:referral"));
+    await bot.handleUpdate(privateMessageUpdate(Number(OWNER_ID), "25 10"));
+    expect(await getReferralSettings(prisma)).toEqual({
+      enabled: true,
+      referrerCredits: 25,
+      inviteeCredits: 10,
+    });
+  });
+});
+
 

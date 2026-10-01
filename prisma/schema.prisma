@@ -23,6 +23,7 @@ enum CreditTransactionType {
   PURCHASE
   REFUND
   ADMIN_ADJUSTMENT
+  REFERRAL
 }
 
 enum WarrantyClaimStatus {
@@ -44,8 +45,14 @@ model User {
   lastActiveAt       DateTime  @default(now()) @map("last_active_at") @db.Timestamptz(6)
   createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
-  isBlocked          Boolean   @default(false) @map("is_blocked")
+  isBlocked              Boolean   @default(false) @map("is_blocked")
+  referredById           String?   @map("referred_by_id")
+  referredAt             DateTime? @map("referred_at") @db.Timestamptz(6)
+  referralRewardCredits  Int       @default(0) @map("referral_reward_credits")
+  referralWelcomeCredits Int       @default(0) @map("referral_welcome_credits")
 
+  referredBy         User?               @relation("UserReferrals", fields: [referredById], references: [id], onDelete: SetNull)
+  referrals          User[]              @relation("UserReferrals")
   purchases          Purchase[]
   inventoryItems     InventoryItem[]     @relation("InventoryPurchaser")
   codeRedemptions    CodeRedemption[]
@@ -55,6 +62,7 @@ model User {
 
   @@index([lastActiveAt])
   @@index([createdAt])
+  @@index([referredById, referredAt])
   @@map("users")
 }
 

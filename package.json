@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "node scripts/build.mjs",
-    "start": "node dist/index.js",
+    "start": "node scripts/start.mjs",
     "db:generate": "node scripts/db-generate.mjs",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",

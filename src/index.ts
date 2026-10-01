@@ -6,33 +6,9 @@ import { loadConfig } from "./config/env.js";
 import { createDatabase } from "./db/client.js";
 import { createLogger } from "./utils/logger.js";
 import { createBot } from "./bot/create-bot.js";
+import { registerCommandMenus } from "./bot/command-menu.js";
 import { cleanupExpiredResetChallenges } from "./services/admin.service.js";
 import type { AppLogger } from "./utils/logger.js";
-
-const PRIVATE_COMMANDS = [
-  { command: "start", description: "Open the Iris store" },
-  { command: "store", description: "Browse categories and products" },
-  { command: "profile", description: "View your profile and credits" },
-  { command: "wallet", description: "View your credit activity" },
-  { command: "bonus", description: "Claim your daily credits" },
-  { command: "redeem", description: "Redeem a credit code" },
-  { command: "orders", description: "View your purchase history" },
-  { command: "help", description: "Get help using Iris" },
-] as const;
-
-const OWNER_COMMANDS = [
-  { command: "admin", description: "Open the owner panel" },
-  { command: "gift", description: "Gift credits to one user" },
-  { command: "rm", description: "Remove credits from one user" },
-  { command: "giftall", description: "Gift credits to active users" },
-  { command: "code", description: "Generate redeem codes" },
-  { command: "broadcast", description: "Broadcast a message" },
-  { command: "stats", description: "View store statistics" },
-  { command: "export", description: "Download a JSON export" },
-  { command: "addstock", description: "Add digital inventory" },
-  { command: "restart", description: "Gracefully restart via PM2" },
-  { command: "reset", description: "Arm the two-step store reset" },
-] as const;
 
 function startHealthServer(port: number, logger?: AppLogger): Promise<Server> {
   return new Promise((resolve, reject) => {
@@ -146,24 +122,7 @@ async function main(): Promise<void> {
       logger.warn({ err: error }, "Could not delete existing webhook before polling");
     }
 
-    try {
-      await bot.api.setMyCommands([...PRIVATE_COMMANDS], {
-        scope: { type: "all_private_chats" },
-      });
-    } catch (error) {
-      logger.warn({ err: error }, "Could not register private chat commands");
-    }
-
-    try {
-      await bot.api.setMyCommands([...OWNER_COMMANDS], {
-        scope: { type: "chat", chat_id: Number(config.ownerId) },
-      });
-    } catch (error) {
-      logger.warn(
-        { err: error, ownerId: config.ownerId.toString() },
-        "Could not register owner-scoped commands yet (owner may not have started a chat with the bot)",
-      );
-    }
+    await registerCommandMenus(bot.api, config.ownerId, logger);
 
     logger.info({ username: me.username, ownerId: config.ownerId.toString() }, "Iris bot connected");
 

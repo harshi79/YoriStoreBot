@@ -1,13 +1,23 @@
 import { creditLabel, escapeHtml, formatDate, safeText, smallCaps } from "../utils/format.js";
 import { parseDeliveryPayload } from "../utils/credential-parser.js";
-import type { InputRichBlock, InputRichBlockTable, InputRichMessage, RichBlockTableCell, RichText } from "grammy/types";
+import type {
+  InputRichBlock,
+  InputRichBlockTable,
+  InputRichMessage,
+  RichBlockTableCell,
+  RichMessageButton,
+  RichText,
+} from "grammy/types";
 import type { PurchaseResult } from "../services/purchases.service.js";
+import { richButtonRow, richCallbackButton } from "./rich-ui.js";
 
-function tableCell(text: RichText, header = false): RichBlockTableCell {
+type CellAlignment = NonNullable<RichBlockTableCell["align"]>;
+
+function tableCell(text: RichText, header = false, align: CellAlignment = "left"): RichBlockTableCell {
   return {
     text,
     ...(header ? { is_header: true as const } : {}),
-    align: "left",
+    align,
     valign: "middle",
   };
 }
@@ -23,7 +33,12 @@ function keyValueTable(rows: Array<[string, RichText]>, caption: string): InputR
   };
 }
 
-function dataTable(headers: string[], rows: string[][], caption: string): InputRichBlockTable {
+function dataTable(
+  headers: string[],
+  rows: string[][],
+  caption: string,
+  alignments: CellAlignment[] = [],
+): InputRichBlockTable {
   return {
     type: "table",
     caption,
@@ -31,8 +46,8 @@ function dataTable(headers: string[], rows: string[][], caption: string): InputR
     is_striped: true,
     is_compact: true,
     cells: [
-      headers.map((header) => tableCell(header, true)),
-      ...rows.map((row) => row.map((value) => tableCell(value))),
+      headers.map((header, index) => tableCell(header, true, alignments[index] ?? "left")),
+      ...rows.map((row) => row.map((value, index) => tableCell(value, false, alignments[index] ?? "left"))),
     ],
   };
 }
@@ -51,9 +66,9 @@ function richCredentialBlocks(payload: string): InputRichBlock[] {
     return [
       keyValueTable(rows, "Login details"),
       {
-        type: "details",
-        summary: "Show original delivery line",
-        blocks: [{ type: "pre", text: payload }],
+        type: "expandable_blockquote",
+        text: payload,
+        credit: "Original delivery line",
       },
     ];
   }
@@ -66,9 +81,9 @@ function richCredentialBlocks(payload: string): InputRichBlock[] {
     return [
       keyValueTable(rows, "Delivery details"),
       {
-        type: "details",
-        summary: "Show original delivery line",
-        blocks: [{ type: "pre", text: payload }],
+        type: "expandable_blockquote",
+        text: payload,
+        credit: "Original delivery line",
       },
     ];
   }
@@ -80,19 +95,22 @@ function richCredentialBlocks(payload: string): InputRichBlock[] {
   return [{ type: "pre", text: parsed.rawPayload || "No delivery details provided." }];
 }
 
-export function richProductMessage(product: {
-  emoji: string;
-  name: string;
-  category: string;
-  description: string;
-  planDetails?: string;
-  warrantyHours?: number;
-  featured?: boolean;
-  isUnlimited?: boolean;
-  price: number;
-  stock: number;
-  credits: number;
-}): InputRichMessage {
+export function richProductMessage(
+  product: {
+    emoji: string;
+    name: string;
+    category: string;
+    description: string;
+    planDetails?: string;
+    warrantyHours?: number;
+    featured?: boolean;
+    isUnlimited?: boolean;
+    price: number;
+    stock: number;
+    credits: number;
+  },
+  actions: RichMessageButton[] = [],
+): InputRichMessage {
   const stock = product.isUnlimited
     ? "Unlimited"
     : product.stock > 0 ? product.stock.toLocaleString("en-US") : "Out of stock";
@@ -113,20 +131,24 @@ export function richProductMessage(product: {
       { type: "paragraph", text: product.category },
       ...(product.description.trim() ? [{ type: "paragraph" as const, text: product.description.trim() }] : []),
       keyValueTable(rows, "Item details"),
+      ...(actions.length ? [richButtonRow(actions)] : []),
     ],
   };
 }
 
-export function richPurchaseConfirmationMessage(product: {
-  emoji: string;
-  name: string;
-  category: string;
-  price: number;
-  stock: number;
-  credits: number;
-  quantity: number;
-  isUnlimited: boolean;
-}): InputRichMessage {
+export function richPurchaseConfirmationMessage(
+  product: {
+    emoji: string;
+    name: string;
+    category: string;
+    price: number;
+    stock: number;
+    credits: number;
+    quantity: number;
+    isUnlimited: boolean;
+  },
+  actionRows: RichMessageButton[][] = [],
+): InputRichMessage {
   const total = product.price * product.quantity;
   const canAfford = product.credits >= total;
   const available = product.isUnlimited ? "Unlimited" : `${product.stock.toLocaleString("en-US")} available`;
@@ -143,6 +165,7 @@ export function richPurchaseConfirmationMessage(product: {
         ["Balance after purchase", canAfford ? creditLabel(product.credits - total) : `Short by ${creditLabel(total - product.credits)}`],
         ["Policy", "No refunds · all sales are final"],
       ], "Review before buying"),
+      ...actionRows.map((actions) => richButtonRow(actions)),
       {
         type: "footer",
         text: canAfford
@@ -161,7 +184,12 @@ export interface PurchaseHistoryRow {
   warrantyClaim?: { status: string } | null;
 }
 
-export function richOrderHistoryMessage(purchases: PurchaseHistoryRow[], total: number): InputRichMessage {
+export function richOrderHistoryMessage(
+  purchases: PurchaseHistoryRow[],
+  total: number,
+  page: number,
+  pages: number,
+): InputRichMessage {
   const rows = purchases.map((purchase) => {
     const issueStatus = purchase.warrantyClaim?.status;
     const status = issueStatus === "PENDING" ? "Issue pending"
@@ -175,11 +203,24 @@ export function richOrderHistoryMessage(purchases: PurchaseHistoryRow[], total: 
       formatDate(purchase.createdAt),
     ];
   });
+  const orderButtons: InputRichBlock[] = purchases.map((purchase) => richButtonRow([
+    richCallbackButton(
+      `${purchase.product.emoji} Open #${purchase.id.slice(0, 6)}`,
+      `order:view:${purchase.id}`,
+    ),
+  ]));
+  const pageButtons = [
+    ...(page > 0 ? [richCallbackButton("◀ Newer", `orders:page:${page - 1}`)] : []),
+    ...(page + 1 < pages ? [richCallbackButton("Older ▶", `orders:page:${page + 1}`)] : []),
+  ];
+
   return {
     blocks: [
-      { type: "heading", size: 2, text: `Your Order Vault · ${total}` },
-      { type: "paragraph", text: "Private purchase history. Open an order below to view its email, password, delivery details, or download a receipt." },
-      dataTable(["Item / order", "Paid", "Purchased"], rows, "Purchase history"),
+      { type: "heading", size: 2, text: "📦 Your orders" },
+      { type: "paragraph", text: `Private purchase history · ${total} order${total === 1 ? "" : "s"}. Select an order to view its delivery details.` },
+      dataTable(["Item / order", "Paid", "Purchased"], rows, "Order history", ["left", "right", "right"]),
+      ...orderButtons,
+      ...(pageButtons.length ? [richButtonRow(pageButtons)] : []),
     ],
   };
 }
@@ -195,6 +236,7 @@ export function richOrderDetailMessage(input: {
   payload: string;
   planDetails: string;
   deliveryInstructions: string;
+  actions?: RichMessageButton[];
 }): InputRichMessage {
   const blocks: InputRichBlock[] = [
     { type: "heading", size: 2, text: `${input.productEmoji} ${input.productName}` },
@@ -210,13 +252,21 @@ export function richOrderDetailMessage(input: {
   ];
   if (input.planDetails.trim()) blocks.push({ type: "paragraph", text: `Plan / specs: ${input.planDetails.trim()}` });
   if (input.deliveryInstructions.trim()) {
-    blocks.push({ type: "details", summary: "Login guide & rules", blocks: [{ type: "paragraph", text: input.deliveryInstructions.trim() }] });
+    blocks.push({
+      type: "expandable_blockquote",
+      text: input.deliveryInstructions.trim(),
+      credit: "Login guide & rules",
+    });
   }
+  if (input.actions?.length) blocks.push(richButtonRow(input.actions));
   blocks.push({ type: "footer", text: "Keep these credentials private. Sales are final; refunds are not offered." });
   return { blocks };
 }
 
-export function richPurchaseDeliveryMessage(result: PurchaseResult): InputRichMessage {
+export function richPurchaseDeliveryMessage(
+  result: PurchaseResult,
+  actionRows: RichMessageButton[][] = [],
+): InputRichMessage {
   const items = result.payloads && result.payloads.length > 1 ? result.payloads : [result.payload];
   const blocks: InputRichBlock[] = [
     { type: "heading", size: 2, text: "Purchase complete" },
@@ -233,24 +283,92 @@ export function richPurchaseDeliveryMessage(result: PurchaseResult): InputRichMe
   }
   if (result.planDetails?.trim()) blocks.push({ type: "paragraph", text: `Plan / specs: ${result.planDetails.trim()}` });
   if (result.deliveryInstructions?.trim()) {
-    blocks.push({ type: "details", summary: "Login guide & rules", blocks: [{ type: "paragraph", text: result.deliveryInstructions.trim() }] });
+    blocks.push({
+      type: "expandable_blockquote",
+      text: result.deliveryInstructions.trim(),
+      credit: "Login guide & rules",
+    });
   }
   if (result.warrantyHours && result.warrantyHours > 0) {
     blocks.push({ type: "paragraph", text: `Replacement coverage: ${result.warrantyHours} hours. Report an issue from My Orders.` });
   }
+  blocks.push(...actionRows.map((actions) => richButtonRow(actions)));
   blocks.push({ type: "footer", text: "Keep these credentials private. All sales are final; refunds are not offered." });
   return { blocks };
 }
 
+export function richHomeMessage(firstName: string | null | undefined): InputRichMessage {
+  const name = safeText(firstName, "friend");
+  return {
+    blocks: [
+      { type: "heading", size: 1, text: `✨ Welcome, ${name}` },
+      {
+        type: "paragraph",
+        text: "Your private digital store for authorized goods, daily credits, and secure delivery.",
+      },
+      richButtonRow([
+        richCallbackButton("🛍 Browse store", "nav:store", "primary"),
+        richCallbackButton("🎁 Daily bonus", "nav:bonus", "success"),
+      ]),
+      { type: "heading", size: 4, text: "YOUR ACCOUNT" },
+      richButtonRow([
+        richCallbackButton("👤 Profile", "nav:profile"),
+        richCallbackButton("💳 Wallet", "nav:wallet"),
+        richCallbackButton("📦 My orders", "nav:orders"),
+      ]),
+      richButtonRow([
+        richCallbackButton("ℹ️ Help & commands", "nav:help", "link"),
+      ]),
+      richButtonRow([
+        { text: "👑 Contact support", url: "https://t.me/YoriNetwork" },
+      ]),
+      { type: "footer", text: "Orders are delivered privately to the account that placed them." },
+    ],
+  };
+}
+
+export function richHelpMessage(): InputRichMessage {
+  const commands = [
+    ["/start", "Open the welcome screen"],
+    ["/store", "Browse categories and products"],
+    ["/search", "Search the catalog by keyword"],
+    ["/profile", "View your profile and credits"],
+    ["/wallet", "Review your balance activity"],
+    ["/bonus", "Claim credits when ready"],
+    ["/redeem CODE", "Redeem a credit code"],
+    ["/orders", "Open your delivery history"],
+    ["/help", "Show this guide"],
+    ["/cancel", "Cancel the current form"],
+    ["/admin", "Owner-only control panel"],
+  ];
+  return {
+    blocks: [
+      { type: "heading", size: 1, text: "ℹ️ Help & commands" },
+      { type: "paragraph", text: "Use a command below or choose an action. Only public commands and /admin are listed here." },
+      dataTable(["Command", "What it does"], commands, "Quick reference"),
+      {
+        type: "footer",
+        text: "Purchases are private and final. Eligible delivery issues can be reviewed for replacement; refunds are not offered.",
+      },
+      richButtonRow([
+        richCallbackButton("🛍 Browse store", "nav:store", "primary"),
+        richCallbackButton("🎁 Daily bonus", "nav:bonus", "success"),
+      ]),
+      richButtonRow([
+        { text: "👑 Contact support", url: "https://t.me/YoriNetwork" },
+      ]),
+    ],
+  };
+}
+
 export function welcomeMessage(firstName: string | null | undefined): string {
   const name = escapeHtml(safeText(firstName, "friend"));
-  return `✦ <b>${smallCaps("Hello, I'm Iris")}</b> ✦\n\n` +
-    `<i>${smallCaps("Your digital store assistant")}</i>\n\n` +
-    `${smallCaps("Discover authorized digital goods, collect credits, and get your purchases delivered privately.")}\n\n` +
-    `👤 ${smallCaps("Profile")}: check your balance and account\n` +
-    `🎁 ${smallCaps("Bonus")}: claim your daily credits\n` +
-    `🛍 ${smallCaps("Store")}: find something you love\n\n` +
-    `${smallCaps("Hello")}, ${name} ✦`;
+  return `✨ <b>Welcome to Iris, ${name}</b>\n\n` +
+    `Your private digital store for authorized goods, daily credits, and secure delivery.\n\n` +
+    `🛍 Browse categories and featured items\n` +
+    `🎁 Claim your daily credits\n` +
+    `📦 Keep track of purchases and receipts\n\n` +
+    `Choose where to begin below.`;
 }
 
 export function profileMessage(input: {
@@ -396,15 +514,19 @@ export function purchaseDeliveryMessage(result: PurchaseResult): string {
 }
 
 export function helpMessage(): string {
-  return `ℹ️ <b>${smallCaps("Iris help")}</b>\n\n` +
-    `• /store — browse enabled categories, featured items, and search\n` +
-    `• /search QUERY — search products by keyword\n` +
-    `• /profile — view your balance and bonus status\n` +
-    `• /wallet — review your credit balance and activity history\n` +
-    `• /bonus — claim credits when your timer is ready\n` +
-    `• /redeem CODE — apply a credit code\n` +
-    `• /orders — open your Order Vault, view your delivered credentials, download .txt receipts, or report an issue\n\n` +
-    `${smallCaps("Purchases are delivered only to the Telegram account that placed the order.")}\n` +
-    `${smallCaps("All sales are final. Refunds are not offered; eligible issues may be reviewed for replacement during the listed replacement window.")}\n` +
-    `👑 <a href="https://t.me/YoriNetwork">${smallCaps("Contact the owner")}</a>`;
+  return `ℹ️ <b>Help & commands</b>\n\n` +
+    `• /start — open the welcome screen\n` +
+    `• /store — browse categories and products\n` +
+    `• /search QUERY — search the catalog\n` +
+    `• /profile — view your profile and credits\n` +
+    `• /wallet — review your credit activity\n` +
+    `• /bonus — claim credits when ready\n` +
+    `• /redeem CODE — redeem a credit code\n` +
+    `• /orders — view deliveries and download receipts\n` +
+    `• /help — show this guide\n` +
+    `• /cancel — cancel the current form\n` +
+    `• /admin — open the owner panel (owner only)\n\n` +
+    `Purchases are delivered only to the Telegram account that placed the order. ` +
+    `All sales are final; eligible delivery issues may be reviewed for replacement, but refunds are not offered.\n\n` +
+    `👑 <a href="https://t.me/YoriNetwork">Contact support</a>`;
 }

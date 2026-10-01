@@ -2,12 +2,13 @@ import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { PrismaPGlite } from "pglite-prisma-adapter";
-import { GrammyError } from "grammy";
+import { GrammyError, InlineKeyboard } from "grammy";
 import type { Api } from "grammy";
 import type { Update, User as TelegramUser } from "grammy/types";
 import { PrismaClient } from "../src/generated/prisma/client.js";
 import { createBot } from "../src/bot/create-bot.js";
-import { editOrReply } from "../src/bot/render.js";
+import { COMMAND_MENU, PUBLIC_COMMANDS, registerCommandMenus } from "../src/bot/command-menu.js";
+import { editOrReply, editOrReplyRich } from "../src/bot/render.js";
 import type { BotContext } from "../src/types/context.js";
 import type { AppLogger } from "../src/utils/logger.js";
 import { touchUser } from "../src/services/users.service.js";
@@ -86,7 +87,15 @@ function makeTestBot() {
     }
     return { ok: true, result: true } as never;
   });
-  return { bot, calls };
+  return { bot, calls, logger };
+}
+
+function richCallbackData(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(richCallbackData);
+  if (typeof value !== "object" || value === null) return [];
+  const record = value as Record<string, unknown>;
+  const current = typeof record.callback_data === "string" ? [record.callback_data] : [];
+  return [...current, ...Object.values(record).flatMap(richCallbackData)];
 }
 
 describe("runtime configuration", () => {
@@ -129,6 +138,28 @@ describe("runtime configuration", () => {
     } finally {
       await db.close();
     }
+  });
+});
+
+describe("Telegram command menu", () => {
+  it("shows public commands plus /admin to everyone and overwrites the owner's legacy menu", async () => {
+    const { bot, calls, logger } = makeTestBot();
+    await registerCommandMenus(bot.api, OWNER_ID, logger);
+
+    const registrations = calls.filter((call) => call.method === "setMyCommands");
+    expect(registrations).toHaveLength(3);
+    const names = registrations.map((call) =>
+      (call.payload.commands as Array<{ command: string }>).map(({ command }) => command),
+    );
+    const expected = [...PUBLIC_COMMANDS.map(({ command }) => command), "admin"];
+    expect(COMMAND_MENU.map(({ command }) => command)).toEqual(expected);
+    expect(names).toEqual([expected, expected, expected]);
+    for (const hiddenOwnerCommand of ["gift", "rm", "giftall", "code", "broadcast", "stats", "export", "addstock", "restart", "reset"]) {
+      expect(names[0]).not.toContain(hiddenOwnerCommand);
+    }
+    expect(registrations[0]?.payload.scope).toEqual({ type: "default" });
+    expect(registrations[1]?.payload.scope).toEqual({ type: "all_private_chats" });
+    expect(registrations[2]?.payload.scope).toEqual({ type: "chat", chat_id: Number(OWNER_ID) });
   });
 });
 
@@ -664,6 +695,32 @@ describe("Telegram authorization and callback ownership", () => {
     expect(calls.some((call) => call.method.startsWith("editMessage"))).toBe(false);
   });
 
+  it("renders the owner panel as a sectioned Bot API 10.3 rich dashboard", async () => {
+    const { bot, calls } = makeTestBot();
+    await bot.handleUpdate(privateMessageUpdate(Number(OWNER_ID), "/admin"));
+
+    const panelCall = calls.find((call) => call.method === "sendRichMessage");
+    expect(panelCall).toBeDefined();
+    expect(JSON.stringify(panelCall?.payload.rich_message)).toContain("Owner console");
+    const actions = richCallbackData(panelCall?.payload.rich_message);
+    for (const data of [
+      "admin:products:0",
+      "admin:categories",
+      "admin:inventory",
+      "admin:users:0",
+      "admin:purchases:0",
+      "admin:warranty:0",
+      "admin:stats",
+      "admin:export",
+      "admin:settings",
+      "admin:restart",
+      "admin:reset",
+      "nav:home",
+    ]) {
+      expect(actions).toContain(data);
+    }
+  });
+
   it("rejects forged admin, inventory, user, and reset callbacks from non-owners", async () => {
     const victim = await makeUser(77_003n, 80);
     const { category, product } = await makeProduct("Protected item", 10);
@@ -784,10 +841,8 @@ describe("Telegram authorization and callback ownership", () => {
 
     await bot.handleUpdate(privateCallbackUpdate(Number(buyer.telegramId), `buy:start:${product.id}`));
     const confirmationCall = calls.filter((call) => call.method === "editMessageText").at(-1);
-    const markup = confirmationCall?.payload.reply_markup as {
-      inline_keyboard?: Array<Array<{ text?: string; callback_data?: string }>>;
-    } | undefined;
-    const confirmData = markup?.inline_keyboard?.flat().find((button) => button.text?.includes("CONFIRM BUY"))?.callback_data;
+    const confirmData = richCallbackData(confirmationCall?.payload.rich_message)
+      .find((data) => data.startsWith("buy:confirm:"));
     expect(confirmData).toMatch(/^buy:confirm:/);
     expect(confirmData).toBeDefined();
 
@@ -811,10 +866,9 @@ describe("Telegram authorization and callback ownership", () => {
     await addInventoryItems(prisma, product.id, ["expiry-private-stock"]);
     const { bot, calls } = makeTestBot();
     await bot.handleUpdate(privateCallbackUpdate(Number(buyer.telegramId), `buy:start:${product.id}`));
-    const markup = calls.filter((call) => call.method === "editMessageText").at(-1)?.payload.reply_markup as {
-      inline_keyboard?: Array<Array<{ text?: string; callback_data?: string }>>;
-    } | undefined;
-    const confirmation = markup?.inline_keyboard?.flat().find((button) => button.text?.includes("CONFIRM BUY"))?.callback_data;
+    const confirmationCall = calls.filter((call) => call.method === "editMessageText").at(-1);
+    const confirmation = richCallbackData(confirmationCall?.payload.rich_message)
+      .find((data) => data.startsWith("buy:confirm:"));
     expect(confirmation).toBeDefined();
 
     const expiredUpdate = privateCallbackUpdate(Number(buyer.telegramId), confirmation!);
@@ -838,10 +892,9 @@ describe("Telegram authorization and callback ownership", () => {
     const { bot, calls } = makeTestBot();
 
     await bot.handleUpdate(privateCallbackUpdate(Number(buyer.telegramId), `buy:start:${product.id}`));
-    const firstMarkup = calls.filter((call) => call.method === "editMessageText").at(-1)?.payload.reply_markup as {
-      inline_keyboard?: Array<Array<{ text?: string; callback_data?: string }>>;
-    } | undefined;
-    const staleData = firstMarkup?.inline_keyboard?.flat().find((button) => button.text?.includes("CONFIRM BUY"))?.callback_data;
+    const firstRichCall = calls.filter((call) => call.method === "editMessageText").at(-1);
+    const staleData = richCallbackData(firstRichCall?.payload.rich_message)
+      .find((data) => data.startsWith("buy:confirm:"));
     expect(staleData).toBeDefined();
     await prisma.product.update({ where: { id: product.id }, data: { price: 45 } });
     await bot.handleUpdate(privateCallbackUpdate(Number(buyer.telegramId), staleData!));
@@ -851,9 +904,9 @@ describe("Telegram authorization and callback ownership", () => {
     expect(await countAvailableInventory(prisma, product.id)).toBe(1);
 
     await bot.handleUpdate(privateMessageUpdate(Number(OWNER_ID), "/admin"));
-    expect(calls.some((call) => call.method === "sendMessage" && String(call.payload.text).includes("ᴏᴡɴᴇʀ ᴘᴀɴᴇʟ"))).toBe(true);
+    expect(calls.some((call) => call.method === "sendRichMessage" && JSON.stringify(call.payload.rich_message).includes("Owner console"))).toBe(true);
     await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), "admin:panel"));
-    expect(calls.some((call) => call.method === "editMessageText" && String(call.payload.text).includes("ᴏᴡɴᴇʀ ᴘᴀɴᴇʟ"))).toBe(true);
+    expect(calls.some((call) => call.method === "editMessageText" && JSON.stringify(call.payload.rich_message ?? "").includes("Owner console"))).toBe(true);
   });
 
   it("returns safe responses for malformed owner and user commands", async () => {
@@ -983,6 +1036,43 @@ describe("Telegram message editing", () => {
     await expect(editOrReply(expiredContext.context, "Fresh menu", undefined, logger)).resolves.toBeUndefined();
     expect(expiredContext.reply).toHaveBeenCalledTimes(1);
   });
+
+  it("falls back to HTML and the legacy keyboard if a rich-message edit is rejected", async () => {
+    const unsupported = new GrammyError(
+      "Call to 'editMessageText' failed!",
+      { ok: false, error_code: 400, description: "Bad Request: rich message blocks are not supported" },
+      "editMessageText",
+      {},
+    );
+    const api = { editMessageText: vi.fn().mockRejectedValue(unsupported) };
+    const reply = vi.fn().mockResolvedValue(undefined);
+    const context = {
+      callbackQuery: {
+        message: {
+          message_id: 2,
+          date: 1,
+          chat: { id: 88_002, type: "private" },
+          text: "Old menu",
+        },
+      },
+      api,
+      reply,
+    } as unknown as BotContext;
+    const fallbackKeyboard = new InlineKeyboard().text("Back to store", "nav:store");
+
+    await editOrReplyRich(
+      context,
+      { blocks: [{ type: "heading", size: 2, text: "Rich screen" }] },
+      "Plain-text fallback",
+      { fallbackKeyboard, logger },
+    );
+
+    expect(api.editMessageText).toHaveBeenCalledTimes(2);
+    expect(reply).toHaveBeenCalledWith(
+      "Plain-text fallback",
+      expect.objectContaining({ reply_markup: fallbackKeyboard, parse_mode: "HTML" }),
+    );
+  });
 });
 
 describe("smart account delivery, presets, order vault, warranty, and restock alerts", () => {
@@ -1057,7 +1147,7 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
     expect(txt).toContain("IMPORTANT RULES & LOGIN INSTRUCTIONS");
   });
 
-  it("uses rich tables for product details, confirmation, delivery, and later order history", async () => {
+  it("uses Bot API 10.3 rich tables, styled buttons, and expandable delivery details", async () => {
     const buyer = await makeUser(91_010n, 250);
     const { product } = await makeProduct("Rich-table streaming", 40);
     await addInventoryItems(prisma, product.id, ["buyer@example.test:StrongPass123 | Plan: Premium"]);
@@ -1066,16 +1156,17 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
 
     await bot.handleUpdate(privateCallbackUpdate(telegramId, `store:product:${product.id}`));
     let richCall = calls.filter((call) => call.method === "editMessageText").at(-1);
-    expect(JSON.stringify(richCall?.payload.rich_message)).toContain("table");
-    expect(JSON.stringify(richCall?.payload.rich_message)).toContain("No refunds");
+    const productRichMessage = JSON.stringify(richCall?.payload.rich_message);
+    expect(productRichMessage).toContain("table");
+    expect(productRichMessage).toContain("is_compact");
+    expect(productRichMessage).toContain("No refunds");
+    expect(richCallbackData(richCall?.payload.rich_message)).toContain(`buy:start:${product.id}`);
 
     await bot.handleUpdate(privateCallbackUpdate(telegramId, `buy:start:${product.id}`));
     richCall = calls.filter((call) => call.method === "editMessageText").at(-1);
     expect(JSON.stringify(richCall?.payload.rich_message)).toContain("Review before buying");
-    const confirmMarkup = richCall?.payload.reply_markup as {
-      inline_keyboard?: Array<Array<{ callback_data?: string }>>;
-    } | undefined;
-    const confirmData = confirmMarkup?.inline_keyboard?.flat().find((button) => button.callback_data?.startsWith("buy:confirm:"))?.callback_data;
+    const confirmData = richCallbackData(richCall?.payload.rich_message)
+      .find((data) => data.startsWith("buy:confirm:"));
     expect(confirmData).toBeDefined();
 
     await bot.handleUpdate(privateCallbackUpdate(telegramId, confirmData!));
@@ -1084,17 +1175,17 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
     expect(delivery).toContain("buyer@example.test");
     expect(delivery).toContain("StrongPass123");
     expect(delivery).toContain("table");
+    expect(delivery).toContain("expandable_blockquote");
+    expect(richCallbackData(richCall?.payload.rich_message)).toContain("nav:orders");
     expect(await prisma.purchase.count({ where: { buyerId: buyer.id } })).toBe(1);
 
     await bot.handleUpdate(privateCallbackUpdate(telegramId, "nav:orders"));
     richCall = calls.filter((call) => call.method === "editMessageText").at(-1);
-    expect(JSON.stringify(richCall?.payload.rich_message)).toContain("Purchase history");
-    expect(JSON.stringify(richCall?.payload.rich_message)).toContain("Rich-table streaming");
+    const ordersRichMessage = JSON.stringify(richCall?.payload.rich_message);
+    expect(ordersRichMessage).toContain("Order history");
+    expect(ordersRichMessage).toContain("Rich-table streaming");
     const orderId = await prisma.purchase.findFirstOrThrow({ where: { buyerId: buyer.id } }).then((order) => order.id);
-    const orderMarkup = richCall?.payload.reply_markup as {
-      inline_keyboard?: Array<Array<{ callback_data?: string }>>;
-    } | undefined;
-    expect(orderMarkup?.inline_keyboard?.flat().some((button) => button.callback_data === `order:view:${orderId}`)).toBe(true);
+    expect(richCallbackData(richCall?.payload.rich_message)).toContain(`order:view:${orderId}`);
 
     await bot.handleUpdate(privateCallbackUpdate(telegramId, `order:view:${orderId}`));
     richCall = calls.filter((call) => call.method === "editMessageText").at(-1);
@@ -1102,6 +1193,15 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
     expect(orderDetail).toContain("Login details");
     expect(orderDetail).toContain("buyer@example.test");
     expect(orderDetail).toContain("StrongPass123");
+    expect(orderDetail).toContain("expandable_blockquote");
+    expect(richCallbackData(richCall?.payload.rich_message)).toContain(`order:txt:${orderId}`);
+
+    await bot.handleUpdate(privateCallbackUpdate(telegramId, `order:txt:${orderId}`));
+    const receiptCall = calls.filter((call) => call.method === "sendRichMessage").at(-1);
+    const receiptBlocks = (receiptCall?.payload.rich_message as { blocks?: Array<Record<string, unknown>> } | undefined)?.blocks;
+    const receiptBlock = receiptBlocks?.find((block) => block.type === "document");
+    expect(receiptBlock).toBeDefined();
+    expect(receiptBlock?.caption).toMatchObject({ text: `📄 Order receipt · #${orderId.slice(0, 8)}` });
 
     const lowFundsUser = await makeUser(91_011n, 5);
     const { product: unaffordableProduct } = await makeProduct("Premium add-on", 20);
@@ -1109,12 +1209,9 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
     await bot.handleUpdate(privateCallbackUpdate(Number(lowFundsUser.telegramId), `buy:start:${unaffordableProduct.id}`));
     richCall = calls.filter((call) => call.method === "editMessageText").at(-1);
     expect(JSON.stringify(richCall?.payload.rich_message)).toContain("Short by 15");
-    const unaffordableMarkup = richCall?.payload.reply_markup as {
-      inline_keyboard?: Array<Array<{ callback_data?: string }>>;
-    } | undefined;
-    const unaffordableButtons = unaffordableMarkup?.inline_keyboard?.flat().map((button) => button.callback_data);
+    const unaffordableButtons = richCallbackData(richCall?.payload.rich_message);
     expect(unaffordableButtons).toContain("nav:bonus");
-    expect(unaffordableButtons?.some((data) => data?.startsWith("buy:confirm:"))).toBe(false);
+    expect(unaffordableButtons.some((data) => data.startsWith("buy:confirm:"))).toBe(false);
     expect(await prisma.purchase.count({ where: { buyerId: lowFundsUser.id } })).toBe(0);
   });
 

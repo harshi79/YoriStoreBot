@@ -15,7 +15,8 @@ import {
   productPresetsKeyboard,
   userPaginationKeyboard,
 } from "../keyboards/inline.js";
-import { editOrReply } from "./render.js";
+import { editOrReply, editOrReplyRich } from "./render.js";
+import { adminPanelMessage } from "../messages/admin.js";
 import {
   getAvailableInventoryItem,
   getProduct,
@@ -33,12 +34,13 @@ import { creditLabel, escapeHtml, formatDate, smallCaps } from "../utils/format.
 const PAGE_SIZE = 8;
 
 export async function showAdminPanel(ctx: BotContext, deps: BotDependencies): Promise<void> {
-  await editOrReply(
-    ctx,
-    `👑 <b>${smallCaps("Iris owner panel")}</b>\n\n${smallCaps("Choose an area to manage your store.")}`,
-    adminPanelKeyboard(),
-    deps.logger,
-  );
+  const fallback = `👑 <b>Iris · Owner console</b>\n\n` +
+    `Manage your catalog, stock, customers, orders, and operations from one place. ` +
+    `Reset always sends a backup and asks for two confirmations.`;
+  await editOrReplyRich(ctx, adminPanelMessage(), fallback, {
+    fallbackKeyboard: adminPanelKeyboard(),
+    logger: deps.logger,
+  });
 }
 
 export async function showCategoriesAdmin(ctx: BotContext, deps: BotDependencies): Promise<void> {

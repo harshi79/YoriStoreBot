@@ -4,31 +4,31 @@ import { PRODUCT_DELIVERY_PRESETS } from "../utils/credential-parser.js";
 
 export function mainKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text("🛍 STORE", "nav:store")
-    .text("👤 PROFILE", "nav:profile")
+    .text("🛍 Browse store", "nav:store")
+    .text("🎁 Daily bonus", "nav:bonus")
     .row()
-    .text("💳 WALLET", "nav:wallet")
-    .text("🎁 BONUS", "nav:bonus")
+    .text("📦 My orders", "nav:orders")
+    .text("👤 Profile", "nav:profile")
     .row()
-    .text("📦 MY ORDERS", "nav:orders")
-    .text("ℹ️ HELP", "nav:help")
+    .text("💳 Wallet", "nav:wallet")
+    .text("ℹ️ Help", "nav:help")
     .row()
-    .url("👑 OWNER", "https://t.me/YoriNetwork");
+    .url("👑 Contact support", "https://t.me/YoriNetwork");
 }
 
 export function profileKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text("🛍 STORE", "nav:store")
-    .text("💳 WALLET", "nav:wallet")
+    .text("🛍 Store", "nav:store")
+    .text("💳 Wallet", "nav:wallet")
     .row()
-    .text("🎁 BONUS", "nav:bonus")
-    .text("📦 ORDERS", "nav:orders")
+    .text("🎁 Bonus", "nav:bonus")
+    .text("📦 Orders", "nav:orders")
     .row()
-    .text("◀ BACK", "nav:home");
+    .text("◀ Main menu", "nav:home");
 }
 
 export function backHomeKeyboard(): InlineKeyboard {
-  return new InlineKeyboard().text("◀ BACK", "nav:home");
+  return new InlineKeyboard().text("◀ Main menu", "nav:home");
 }
 
 export function categoriesKeyboard(
@@ -37,7 +37,7 @@ export function categoriesKeyboard(
 ): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   if (featuredCount > 0) {
-    keyboard.text(`🔥 FEATURED ITEMS · ${featuredCount}`, "store:featured:0").row();
+    keyboard.text(`🔥 Featured items · ${featuredCount}`, "store:featured:0").row();
   }
   for (const category of categories) {
     keyboard.text(
@@ -45,7 +45,7 @@ export function categoriesKeyboard(
       `store:category:${category.id}:0`,
     ).row();
   }
-  keyboard.text("🔍 SEARCH", "store:search:start").text("◀ HOME", "nav:home");
+  keyboard.text("🔍 Search", "store:search:start").text("◀ Home", "nav:home");
   return keyboard;
 }
 
@@ -57,7 +57,7 @@ export function storeCategoryProductsKeyboard(
 ): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   for (const product of products) {
-    const status = product._count.inventory > 0 ? "" : " · OUT OF STOCK";
+    const status = product._count.inventory > 0 ? "" : " · Out of stock";
     const badge = product.featured ? "🔥 " : "";
     keyboard.text(
       `${badge}${product.emoji} ${product.name} · ${product.price} credits${status}`.slice(0, 58),
@@ -80,7 +80,7 @@ export function productListKeyboard(
 ): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   for (const product of products) {
-    const status = product.enabled && product._count.inventory > 0 ? "" : " · OUT";
+    const status = product.enabled && product._count.inventory > 0 ? "" : " · Unavailable";
     const badge = product.featured ? "🔥 " : "";
     const prefix = namespace === "store" ? "store:product:" : "admin:product:view:";
     keyboard.text(
@@ -165,13 +165,13 @@ export function adminPanelKeyboard(): InlineKeyboard {
     .text("🗂 Categories", "admin:categories")
     .row()
     .text("📋 Inventory", "admin:inventory")
-    .text("👥 Users", "admin:users:0")
+    .text("🔑 Codes", "admin:codes:0")
     .row()
+    .text("👥 Users", "admin:users:0")
     .text("🎁 Credits", "admin:credits")
-    .text("🔑 Redeem codes", "admin:codes:0")
     .row()
     .text("🧾 Purchases", "admin:purchases:0")
-    .text("🛡 Warranty Claims", "admin:warranty:0")
+    .text("🛡 Warranty", "admin:warranty:0")
     .row()
     .text("📢 Broadcast", "admin:broadcast")
     .text("📊 Statistics", "admin:stats")
@@ -180,13 +180,13 @@ export function adminPanelKeyboard(): InlineKeyboard {
     .text("⚙️ Settings", "admin:settings")
     .row()
     .text("🔄 Restart", "admin:restart")
-    .text("⚠️ Reset", "admin:reset")
+    .text("⚠️ Reset store", "admin:reset")
     .row()
-    .text("🏠 HOME", "nav:home");
+    .text("🏠 Storefront", "nav:home");
 }
 
 export function adminBackKeyboard(): InlineKeyboard {
-  return new InlineKeyboard().text("◀ ADMIN", "admin:panel").text("🏠 HOME", "nav:home");
+  return new InlineKeyboard().text("◀ Control center", "admin:panel").text("🏠 Storefront", "nav:home");
 }
 
 export function categoryListAdminKeyboard(categories: Category[]): InlineKeyboard {

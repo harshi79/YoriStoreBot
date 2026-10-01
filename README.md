@@ -50,7 +50,7 @@ The bonus settings can also be changed from the owner panel; those overrides are
 ## User features
 
 - `/start` sends Iris's welcome video (`https://imglink.cc/cdn/jw1NZXEQQS.mp4`) with a text fallback and inline navigation.
-- `/store`, `/profile`, `/bonus`, `/redeem CODE`, `/orders`, and `/help` are available in private chats.
+- `/store`, `/profile`, `/wallet`, `/bonus`, `/redeem CODE`, `/orders`, and `/help` are available in private chats. `/wallet` shows the current balance and a private, paginated credit ledger with each change and the resulting balance.
 - Categories and products come from PostgreSQL; products show current stock and credit prices.
 - Daily bonuses and code redemptions use conditional database updates and write matching credit-ledger rows in the same transaction.
 - Purchases lock one available stock row, charge the buyer, mark inventory sold, write the purchase and ledger record atomically, and use an idempotency key to make callback retries safe. The delivery is returned only to the purchasing Telegram account.

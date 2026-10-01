@@ -38,6 +38,7 @@ import {
   showHome,
   showOrderDetail,
   showOrders,
+  showWallet,
   showProduct,
   showProfile,
   showStore,
@@ -146,6 +147,7 @@ async function handleUserCallback(ctx: BotContext, deps: BotDependencies, data: 
   if (data === "nav:home") await showHome(ctx, deps);
   else if (data === "nav:store") await showStore(ctx, deps);
   else if (data === "nav:profile") await showProfile(ctx, deps);
+  else if (data === "nav:wallet") await showWallet(ctx, deps);
   else if (data === "nav:bonus") await showBonusStatus(ctx, deps);
   else if (data === "nav:orders") await showOrders(ctx, deps);
   else if (data === "nav:help") await showHelp(ctx, deps);
@@ -154,6 +156,9 @@ async function handleUserCallback(ctx: BotContext, deps: BotDependencies, data: 
   else if (data.startsWith("orders:page:")) {
     const page = Number(data.split(":")[2] ?? 0);
     await showOrders(ctx, deps, page);
+  } else if (data.startsWith("wallet:page:")) {
+    const page = Number(data.split(":")[2] ?? 0);
+    await showWallet(ctx, deps, page);
   } else if (data.startsWith("order:view:")) {
     const purchaseId = data.split(":")[2];
     if (!purchaseId) throw new Error("Order link is invalid.");

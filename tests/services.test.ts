@@ -26,7 +26,7 @@ import {
 import { buildOrderReceiptText, parseDeliveryPayload } from "../src/utils/credential-parser.js";
 import { claimDailyBonus } from "../src/services/bonus.service.js";
 import { createRedeemCodes, redeemCode } from "../src/services/codes.service.js";
-import { changeCredits, giftAllActiveUsers, giftCredits, MAX_CREDITS, removeCredits } from "../src/services/credits.service.js";
+import { changeCredits, giftAllActiveUsers, giftCredits, listUserCreditTransactions, MAX_CREDITS, removeCredits } from "../src/services/credits.service.js";
 import { updateBonusSettings, getBonusSettings } from "../src/services/settings.service.js";
 import { cancelResetChallenge, createResetChallenge, advanceResetChallenge, performConfirmedReset } from "../src/services/admin.service.js";
 import { buildStoreExport } from "../src/services/export.service.js";
@@ -480,6 +480,45 @@ describe("credits, bonuses, and redeem codes", () => {
     expect(await prisma.creditTransaction.count({ where: { userId: user.id } })).toBe(2);
   });
 
+  it("lists each user's credit ledger newest-first with bounded pagination", async () => {
+    const user = await makeUser(20_010n);
+    const otherUser = await makeUser(20_011n);
+    const baseTime = Date.now();
+    await prisma.creditTransaction.createMany({
+      data: Array.from({ length: 5 }, (_, index) => ({
+        id: `wallet-ledger-${index}`,
+        userId: user.id,
+        amount: index % 2 === 0 ? 10 : -5,
+        type: index % 2 === 0 ? "BONUS" as const : "PURCHASE" as const,
+        description: `activity ${index}`,
+        balanceAfter: 50 + index,
+        createdAt: new Date(baseTime + index * 1_000),
+      })),
+    });
+    await prisma.creditTransaction.create({
+      data: {
+        id: "wallet-other-user",
+        userId: otherUser.id,
+        amount: 99,
+        type: "GIFT",
+        description: "private to another user",
+        balanceAfter: 99,
+      },
+    });
+
+    const firstPage = await listUserCreditTransactions(prisma, user.id, 0, 2);
+    expect(firstPage).toMatchObject({ total: 5, page: 0, pages: 3 });
+    expect(firstPage.transactions.map((entry) => entry.description)).toEqual(["activity 4", "activity 3"]);
+
+    const secondPage = await listUserCreditTransactions(prisma, user.id, 1, 2);
+    expect(secondPage.transactions.map((entry) => entry.description)).toEqual(["activity 2", "activity 1"]);
+
+    const outOfRangePage = await listUserCreditTransactions(prisma, user.id, 100, 2);
+    expect(outOfRangePage).toMatchObject({ page: 2, pages: 3 });
+    expect(outOfRangePage.transactions.map((entry) => entry.description)).toEqual(["activity 0"]);
+    expect(JSON.stringify(firstPage)).not.toContain("private to another user");
+  });
+
   it("updates bonus settings transactionally and reads them back", async () => {
     await updateBonusSettings(prisma, { credits: 80, periodHours: 48 });
     await expect(getBonusSettings(prisma, { credits: 25, periodHours: 24 })).resolves.toEqual({ credits: 80, periodHours: 48 });
@@ -847,6 +886,57 @@ describe("Telegram authorization and callback ownership", () => {
     await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), "admin:category:add"));
     await bot.handleUpdate(privateMessageUpdate(Number(OWNER_ID), "/skip"));
     expect(await prisma.category.count()).toBe(0);
+  });
+});
+
+describe("customer wallet activity", () => {
+  it("shows a private, escaped, paginated wallet history from /wallet and its callback", async () => {
+    const user = await makeUser(95_001n, 250);
+    const otherUser = await makeUser(95_002n, 900);
+    const baseTime = Date.now();
+    await prisma.creditTransaction.createMany({
+      data: Array.from({ length: 9 }, (_, index) => ({
+        id: `wallet-view-${index}`,
+        userId: user.id,
+        amount: index % 2 === 0 ? 10 : -5,
+        type: index % 2 === 0 ? "BONUS" as const : "PURCHASE" as const,
+        description: index === 8 ? "<script>private</script>&" : `Ledger event ${index}`,
+        balanceAfter: 100 + index,
+        createdAt: new Date(baseTime + index * 1_000),
+      })),
+    });
+    await prisma.creditTransaction.create({
+      data: {
+        id: "wallet-view-other",
+        userId: otherUser.id,
+        amount: 50,
+        type: "GIFT",
+        description: "Other user's private activity",
+        balanceAfter: 950,
+      },
+    });
+
+    const { bot, calls } = makeTestBot();
+    await bot.handleUpdate(privateMessageUpdate(Number(user.telegramId), "/wallet"));
+    const firstPage = calls.filter((call) => call.method === "sendMessage").at(-1);
+    expect(String(firstPage?.payload.text)).toContain("250 ᴄʀᴇᴅɪᴛs");
+    expect(String(firstPage?.payload.text)).toContain("&lt;script&gt;private&lt;/script&gt;&amp;");
+    expect(String(firstPage?.payload.text)).not.toContain("<script>");
+    expect(String(firstPage?.payload.text)).not.toContain("Other user's private activity");
+    expect(String(firstPage?.payload.text)).toContain("Ledger event 7");
+    expect(String(firstPage?.payload.text)).not.toContain("Ledger event 0");
+
+    const markup = firstPage?.payload.reply_markup as {
+      inline_keyboard?: Array<Array<{ text?: string; callback_data?: string }>>;
+    } | undefined;
+    const nextPageData = markup?.inline_keyboard?.flat().find((button) => button.callback_data === "wallet:page:1")?.callback_data;
+    expect(nextPageData).toBe("wallet:page:1");
+    await bot.handleUpdate(privateCallbackUpdate(Number(user.telegramId), nextPageData!));
+
+    const secondPage = calls.filter((call) => call.method === "editMessageText").at(-1);
+    expect(String(secondPage?.payload.text)).toContain("Ledger event 0");
+    expect(String(secondPage?.payload.text)).not.toContain("Ledger event 7");
+    expect(String(secondPage?.payload.text)).not.toContain("Other user's private activity");
   });
 });
 

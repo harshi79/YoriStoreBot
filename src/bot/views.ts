@@ -7,6 +7,7 @@ import {
   listUserPurchases,
 } from "../services/purchases.service.js";
 import { getBonusSettings } from "../services/settings.service.js";
+import { listUserCreditTransactions } from "../services/credits.service.js";
 import {
   getProduct,
   isSubscribedToStock,
@@ -39,6 +40,7 @@ import {
   formatDate,
   formatDuration,
   smallCaps,
+  truncate,
 } from "../utils/format.js";
 import { buildOrderReceiptText } from "../utils/credential-parser.js";
 import { BonusUnavailableError, DomainError } from "../utils/errors.js";
@@ -284,6 +286,71 @@ export async function showProfile(ctx: BotContext, deps: BotDependencies): Promi
     deps.logger.warn({ err: error }, "Could not send profile avatar; falling back to a text profile");
     await editOrReply(ctx, caption, profileKeyboard(), deps.logger);
   }
+}
+
+const CREDIT_TYPE_ICONS: Record<string, string> = {
+  BONUS: "🎁",
+  GIFT: "🎉",
+  GIFT_ALL: "🎊",
+  REDEEM: "🎟️",
+  PURCHASE: "🛍️",
+  REFUND: "↩️",
+  ADMIN_ADJUSTMENT: "⚙️",
+};
+
+export async function showWallet(ctx: BotContext, deps: BotDependencies, requestedPage = 0): Promise<void> {
+  const user = await findUserByTelegramId(deps.database.prisma, ctx.from!.id);
+  const history = await listUserCreditTransactions(deps.database.prisma, user.id, requestedPage, PAGE_SIZE);
+  const balance = `💰 <b>${smallCaps("Available balance")}:</b> ${creditLabel(user.credits)}`;
+  const keyboard = new InlineKeyboard();
+
+  if (history.total === 0) {
+    keyboard
+      .text("🎁 CLAIM BONUS", "nav:bonus")
+      .text("🛍 STORE", "nav:store")
+      .row()
+      .text("🏠 HOME", "nav:home");
+    await editOrReply(
+      ctx,
+      `💳 <b>${smallCaps("Wallet activity")}</b>\n\n${balance}\n\n${smallCaps("No credit activity yet. Claim a bonus or explore the store to get started.")}`,
+      keyboard,
+      deps.logger,
+    );
+    return;
+  }
+
+  const entries = history.transactions.map((transaction) => {
+    const amount = transaction.amount > 0
+      ? `+${creditLabel(transaction.amount)}`
+      : transaction.amount < 0
+        ? `−${creditLabel(Math.abs(transaction.amount))}`
+        : creditLabel(0);
+    const icon = CREDIT_TYPE_ICONS[transaction.type] ?? "✦";
+    const description = escapeHtml(truncate(transaction.description, 80));
+    return `${icon} <b>${description}</b>\n` +
+      `${amount} · ${smallCaps("Balance")}: ${creditLabel(transaction.balanceAfter)}\n` +
+      `<i>${escapeHtml(formatDate(transaction.createdAt))}</i>`;
+  });
+
+  if (history.pages > 1) {
+    if (history.page > 0) keyboard.text("◀", `wallet:page:${history.page - 1}`);
+    keyboard.text(`${history.page + 1}/${history.pages}`, "noop");
+    if (history.page + 1 < history.pages) keyboard.text("▶", `wallet:page:${history.page + 1}`);
+    keyboard.row();
+  }
+  keyboard
+    .text("🎁 BONUS", "nav:bonus")
+    .text("🛍 STORE", "nav:store")
+    .row()
+    .text("📦 ORDERS", "nav:orders")
+    .text("🏠 HOME", "nav:home");
+
+  await editOrReply(
+    ctx,
+    `💳 <b>${smallCaps("Wallet activity")}</b>\n\n${balance}\n\n${smallCaps("Recent credit activity · newest first")}\n\n${entries.join("\n\n")}`,
+    keyboard,
+    deps.logger,
+  );
 }
 
 export async function showBonusStatus(ctx: BotContext, deps: BotDependencies): Promise<void> {

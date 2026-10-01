@@ -5,6 +5,37 @@ import { InsufficientCreditsError, NotFoundError, ValidationError } from "../uti
 
 export const MAX_CREDITS = 2_000_000_000;
 
+export async function listUserCreditTransactions(
+  prisma: PrismaClient,
+  userId: string,
+  page = 0,
+  pageSize = 8,
+) {
+  const safePage = Number.isSafeInteger(page) ? Math.max(0, page) : 0;
+  const safePageSize = Number.isSafeInteger(pageSize)
+    ? Math.max(1, Math.min(25, pageSize))
+    : 8;
+  const where = { userId };
+  const total = await prisma.creditTransaction.count({ where });
+  const pages = Math.max(1, Math.ceil(total / safePageSize));
+  const currentPage = Math.min(safePage, pages - 1);
+  const transactions = await prisma.creditTransaction.findMany({
+    where,
+    select: {
+      amount: true,
+      type: true,
+      description: true,
+      balanceAfter: true,
+      createdAt: true,
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    skip: currentPage * safePageSize,
+    take: safePageSize,
+  });
+
+  return { transactions, total, page: currentPage, pages };
+}
+
 export interface CreditChangeOptions {
   userId: string;
   amount: number;

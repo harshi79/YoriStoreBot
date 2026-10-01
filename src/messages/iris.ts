@@ -156,6 +156,7 @@ export function helpMessage(): string {
     `• /store — browse enabled categories, featured items, and search\n` +
     `• /search QUERY — search products by keyword\n` +
     `• /profile — view your balance and bonus status\n` +
+    `• /wallet — review your credit balance and activity history\n` +
     `• /bonus — claim credits when your timer is ready\n` +
     `• /redeem CODE — apply a credit code\n` +
     `• /orders — open your Order Vault, download .txt receipts, or claim warranty\n\n` +

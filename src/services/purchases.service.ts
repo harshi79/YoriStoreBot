@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PrismaClient } from "../generated/prisma/client.js";
 import type { WarrantyClaimStatus } from "../generated/prisma/enums.js";
-import { MAX_CREDITS } from "./credits.service.js";
 import {
   InsufficientCreditsError,
   NotFoundError,
@@ -376,7 +375,7 @@ export async function resolveWarrantyClaimReplace(prisma: PrismaClient, claimId:
     `;
     const replacement = stockRows[0];
     if (!replacement) {
-      throw new OutOfStockError("No available stock to auto-replace this order. Add stock first or issue a credit refund.");
+      throw new OutOfStockError("No available stock to replace this order. Add authorized stock before approving the claim.");
     }
 
     const now = new Date();
@@ -412,71 +411,6 @@ export async function resolveWarrantyClaimReplace(prisma: PrismaClient, claimId:
       product: claim.product,
       purchaseId: claim.purchaseId,
       replacementPayload: replacement.payload,
-    };
-  });
-}
-
-export async function resolveWarrantyClaimRefund(prisma: PrismaClient, claimId: string) {
-  return prisma.$transaction(async (tx) => {
-    const claim = await tx.warrantyClaim.findUnique({
-      where: { id: claimId },
-      include: {
-        product: true,
-        buyer: true,
-        purchase: true,
-      },
-    });
-    if (!claim) throw new NotFoundError("That warranty claim no longer exists.");
-    if (claim.status !== "PENDING") {
-      throw new ValidationError(`This claim was already ${claim.status.toLowerCase()}.`);
-    }
-
-    const refundAmount = claim.purchase.amountPaid;
-    const now = new Date();
-    if (refundAmount > 0) {
-      const updated = await tx.user.updateMany({
-        where: { id: claim.buyerId, credits: { lte: MAX_CREDITS - refundAmount } },
-        data: { credits: { increment: refundAmount } },
-      });
-      if (!updated.count) {
-        throw new ValidationError("Buyer's credit balance would exceed the maximum limit.");
-      }
-    }
-    const updatedBuyer = await tx.user.findUniqueOrThrow({ where: { id: claim.buyerId } });
-    await tx.creditTransaction.create({
-      data: {
-        id: randomUUID(),
-        userId: claim.buyerId,
-        amount: refundAmount,
-        type: "REFUND",
-        description: `Warranty refund for ${claim.product.name}`.slice(0, 500),
-        relatedEntityId: claim.purchaseId,
-        balanceAfter: updatedBuyer.credits,
-        createdAt: now,
-      },
-    });
-
-    await tx.inventoryItem.updateMany({
-      where: { id: claim.purchase.inventoryItemId },
-      data: { status: "REMOVED" },
-    });
-
-    const updatedClaim = await tx.warrantyClaim.update({
-      where: { id: claim.id },
-      data: {
-        status: "REFUNDED",
-        resolutionNote: `Refunded ${refundAmount} credits`,
-        resolvedAt: now,
-      },
-    });
-
-    return {
-      claim: updatedClaim,
-      buyerTelegramId: claim.buyer.telegramId,
-      product: claim.product,
-      purchaseId: claim.purchaseId,
-      refundedCredits: refundAmount,
-      newBalance: updatedBuyer.credits,
     };
   });
 }

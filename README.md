@@ -51,13 +51,15 @@ The bonus settings can also be changed from the owner panel; those overrides are
 
 - `/start` sends Iris's welcome video (`https://imglink.cc/cdn/jw1NZXEQQS.mp4`) with a text fallback and inline navigation.
 - `/store`, `/profile`, `/wallet`, `/bonus`, `/redeem CODE`, `/orders`, and `/help` are available in private chats. `/wallet` shows the current balance and a private, paginated credit ledger with each change and the resulting balance.
-- Categories and products come from PostgreSQL; products show current stock and credit prices.
+- Categories and products come from PostgreSQL; products show current stock and credit prices. Product details and purchase confirmations use Telegram Rich Messages for compact item, stock, price, and balance tables, with an HTML fallback.
+- `/orders` keeps a private, paginated purchase history. Opening an order shows parsed email/login, password, plan fields, and delivery rules; users can also download a `.txt` receipt. Order history and delivery screens use Rich Message tables with an HTML fallback.
 - Daily bonuses and code redemptions use conditional database updates and write matching credit-ledger rows in the same transaction.
-- Purchases lock one available stock row, charge the buyer, mark inventory sold, write the purchase and ledger record atomically, and use an idempotency key to make callback retries safe. The delivery is returned only to the purchasing Telegram account.
+- Purchases lock available stock, charge the buyer, mark inventory sold, write the purchase and ledger record atomically, and use an idempotency key to make callback retries safe. Delivery is returned only to the purchasing Telegram account.
+- All sales are final; refunds are not offered. Eligible delivery issues can be reviewed for replacement from available stock during the product's stated replacement window.
 
 ## Owner features
 
-Open `/admin` for inline management of categories, products, inventory, users, redeem codes, purchases, credit settings, statistics, exports, broadcast, restart, and reset. Available owner commands are `/gift USER_ID CREDITS`, `/rm USER_ID CREDITS`, `/giftall CREDITS`, `/code AMOUNT CREDITS MAXREDEEMS`, `/broadcast`, `/stats`, `/export`, `/addstock`, `/restart`, and `/reset`.
+Open `/admin` for inline management of categories, products, inventory, users, redeem codes, purchases, credit settings, statistics, exports, broadcast, restart, and reset. Available owner commands are `/gift USER_ID CREDITS`, `/rm USER_ID CREDITS`, `/giftall CREDITS`, `/code AMOUNT CREDITS MAXREDEEMS`, `/broadcast`, `/stats`, `/export`, `/addstock`, `/restart`, and `/reset`. Delivery-issue claims may be replaced from available stock or rejected; the owner panel has no refund action.
 
 - Inventory can be entered as lines or imported from a `.txt`/`.csv` file (up to 1 MB, 500 items per batch, 3,500 characters per item). Duplicate stock values are skipped using a SHA-256 hash; stock payloads are not shown in admin list views.
 - `/giftall` credits users active in the preceding 72 hours. Over-limit balances are skipped and reported.

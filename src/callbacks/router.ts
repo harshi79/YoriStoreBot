@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { GrammyError, InlineKeyboard, InputFile } from "grammy";
+import { InlineKeyboard, InputFile } from "grammy";
 import type { Bot } from "grammy";
 import type { BotContext } from "../types/context.js";
 import type { BotDependencies } from "../bot/dependencies.js";
@@ -44,7 +44,7 @@ import {
   showStore,
   showWarrantyPrompt,
 } from "../bot/views.js";
-import { editOrReply, editOrReplyRich } from "../bot/render.js";
+import { editMessageRichOrLegacy, editOrReply, editOrReplyRich, replyRichOrLegacy, sendRichOrLegacy } from "../bot/render.js";
 import { beginAdminFlow, handleUserWarrantySubmission } from "../commands/admin-flow.js";
 import { beginReset, cancelReset, completeReset, continueReset, requestRestart, sendStoreExport } from "../commands/admin.js";
 import { broadcastToUsers } from "../services/broadcast.service.js";
@@ -78,10 +78,17 @@ import {
   productMessage,
   purchaseDeliveryMessage,
   renderParsedPayloadBlock,
+  richCredentialBlocks,
   richPurchaseConfirmationMessage,
   richPurchaseDeliveryMessage,
 } from "../messages/iris.js";
-import { richCallbackButton } from "../messages/rich-ui.js";
+import {
+  richButtonRow,
+  richCallbackButton,
+  richHeading,
+  richKeyValueTable,
+  richParagraph,
+} from "../messages/rich-ui.js";
 
 function adminKeyboardFor(data: string) {
   return data.startsWith("admin:") || data.startsWith("reset:") ? adminPanelKeyboard() : mainKeyboard();
@@ -104,12 +111,12 @@ async function showPurchaseConfirmation(
   if (!user) throw new NotFoundError("Send /start first so Iris can create your profile.");
   if (!product.enabled || product.deletedAt || !product.category.enabled || product.category.deletedAt) {
     ctx.session.purchaseConfirmation = null;
-    await editOrReply(ctx, "This product is no longer available.", mainKeyboard(), deps.logger);
+    await editOrReply(ctx, smallCaps("This product is no longer available."), mainKeyboard(), deps.logger);
     return;
   }
   if (product._count.inventory <= 0) {
     ctx.session.purchaseConfirmation = null;
-    await editOrReply(ctx, "⚠️ This product is out of stock right now.", new InlineKeyboard().text("◀ STORE", `store:category:${product.categoryId}:0`), deps.logger);
+    await editOrReply(ctx, smallCaps("⚠️ This product is out of stock right now."), new InlineKeyboard().text(smallCaps("◀ STORE"), `store:category:${product.categoryId}:0`), deps.logger);
     return;
   }
   const maxAvailable = product.isUnlimited ? 5 : Math.min(5, product._count.inventory);
@@ -150,7 +157,7 @@ async function showPurchaseConfirmation(
   const backData = `store:product:${product.id}`;
   const keyboard = canAfford
     ? confirmPurchaseKeyboard(product.id, nonce, product.price, safeQty, maxAvailable)
-    : new InlineKeyboard().text("🎁 Claim bonus", "nav:bonus").row().text("◀ Back to item", backData);
+    : new InlineKeyboard().text(smallCaps("🎁 Claim bonus"), "nav:bonus").row().text(smallCaps("◀ Back to item"), backData);
   const richActionRows: Array<Array<ReturnType<typeof richCallbackButton>>> = [];
   if (canAfford) {
     if (maxAvailable >= 2) {
@@ -231,8 +238,8 @@ async function handleUserCallback(ctx: BotContext, deps: BotDependencies, data: 
     ctx.session.userFlow = { kind: "store:search" };
     await editOrReply(
       ctx,
-      `🔍 <b>${smallCaps("Search Iris store")}</b>\n\nSend a keyword (e.g. <code>crunchyroll</code>, <code>netflix</code>, <code>premium</code>) or tap below to go back.`,
-      new InlineKeyboard().text("◀ STORE", "nav:store").text("🏠 HOME", "nav:home"),
+      `🔍 <b>${smallCaps("Search Iris store")}</b>\n\n${smallCaps("Send a keyword, for example")} <code>crunchyroll</code>, <code>netflix</code>, <code>premium</code> ${smallCaps("or tap below to go back.")}`,
+      new InlineKeyboard().text(smallCaps("◀ STORE"), "nav:store").text(smallCaps("🏠 HOME"), "nav:home"),
       deps.logger,
     );
   } else if (data.startsWith("store:notify:")) {
@@ -246,10 +253,31 @@ async function handleUserCallback(ctx: BotContext, deps: BotDependencies, data: 
     if (!productId) throw new Error("That product link is invalid.");
     const product = await getProduct(deps.database.prisma, productId);
     if (product.mediaFileId) {
-      await ctx.replyWithPhoto(product.mediaFileId, {
-        caption: `${escapeHtml(product.emoji)} <b>${escapeHtml(product.name)}</b>`,
-        parse_mode: "HTML",
-      });
+      const keyboard = new InlineKeyboard()
+        .text(smallCaps("◀ Product"), `store:product:${product.id}`)
+        .text(smallCaps("🏠 Home"), "nav:home");
+      try {
+        await ctx.replyWithRichMessage({
+          blocks: [
+            {
+              type: "photo",
+              photo: { type: "photo", media: product.mediaFileId },
+              caption: { text: [smallCaps(`${product.emoji} `), product.name] },
+            },
+            richButtonRow([
+              richCallbackButton("◀ Product", `store:product:${product.id}`, "link"),
+              richCallbackButton("🏠 Home", "nav:home", "link"),
+            ]),
+          ],
+        });
+      } catch (error) {
+        deps.logger.debug({ err: error }, "Rich product banner failed; using a standard photo message");
+        await ctx.replyWithPhoto(product.mediaFileId, {
+          caption: `${escapeHtml(product.emoji)} <b>${escapeHtml(product.name)}</b>`,
+          parse_mode: "HTML",
+          reply_markup: keyboard,
+        });
+      }
     }
   } else if (data.startsWith("store:category:")) {
     const [, , categoryId, page] = data.split(":");
@@ -306,11 +334,11 @@ async function handleUserCallback(ctx: BotContext, deps: BotDependencies, data: 
     const receiptData = `order:txt:${result.purchaseId}`;
     const issueData = `order:warranty:${result.purchaseId}`;
     const keyboard = new InlineKeyboard()
-      .text("📄 Download receipt", receiptData)
-      .text("🛠 Report issue", issueData)
+      .text(smallCaps("📄 Download receipt"), receiptData)
+      .text(smallCaps("🛠 Report issue"), issueData)
       .row()
-      .text("🛍 Back to store", "nav:store")
-      .text("📦 My orders", "nav:orders");
+      .text(smallCaps("🛍 Back to store"), "nav:store")
+      .text(smallCaps("📦 My orders"), "nav:orders");
     const richActionRows = [
       [
         richCallbackButton("📄 Download receipt", receiptData, "primary"),
@@ -345,7 +373,7 @@ async function handleAdminCallback(
   if (data === "admin:panel") await showAdminPanel(ctx, deps);
   else if (data === "admin:categories") await showCategoriesAdmin(ctx, deps);
   else if (data === "admin:category:add") {
-    await beginAdminFlow(ctx, deps, { kind: "category:create:name" }, `🗂 <b>${smallCaps("New category")}</b>\n\nSend the category name (2–80 characters).`);
+    await beginAdminFlow(ctx, deps, { kind: "category:create:name" }, `🗂 <b>${smallCaps("New category")}</b>\n\n${smallCaps("Send the category name (2–80 characters).")}`);
   } else if (parts[1] === "category" && parts[2] === "view" && parts[3]) {
     await showCategoryAdmin(ctx, deps, parts[3]);
   } else if (parts[1] === "category" && parts[2] === "toggle" && parts[3]) {
@@ -354,11 +382,11 @@ async function handleAdminCallback(
     await updateCategory(deps.database.prisma, category.id, { enabled: !category.enabled });
     await showCategoryAdmin(ctx, deps, category.id);
   } else if (parts[1] === "category" && parts[2] === "rename" && parts[3]) {
-    await beginAdminFlow(ctx, deps, { kind: "category:edit:name", categoryId: parts[3] }, "✏️ Send the new category name.");
+    await beginAdminFlow(ctx, deps, { kind: "category:edit:name", categoryId: parts[3] }, `✏️ ${smallCaps("Send the new category name.")}`);
   } else if (parts[1] === "category" && parts[2] === "description" && parts[3]) {
-    await beginAdminFlow(ctx, deps, { kind: "category:edit:description", categoryId: parts[3] }, "📝 Send the category description (up to 500 characters), or /skip to clear it.");
+    await beginAdminFlow(ctx, deps, { kind: "category:edit:description", categoryId: parts[3] }, `📝 ${smallCaps("Send the category description (up to 500 characters), or /skip to clear it.")}`);
   } else if (parts[1] === "category" && parts[2] === "emoji" && parts[3]) {
-    await beginAdminFlow(ctx, deps, { kind: "category:edit:emoji", categoryId: parts[3] }, "🎨 Send the new category icon or emoji.");
+    await beginAdminFlow(ctx, deps, { kind: "category:edit:emoji", categoryId: parts[3] }, `🎨 ${smallCaps("Send the new category icon or emoji.")}`);
   } else if (parts[1] === "category" && parts[2] === "reorder" && parts[3] && parts[4]) {
     const direction = Number(parts[4]);
     if (direction !== -1 && direction !== 1) throw new Error("Invalid category order action.");
@@ -372,7 +400,7 @@ async function handleAdminCallback(
     if (!category) throw new NotFoundError("That category no longer exists.");
     await editOrReply(
       ctx,
-      `⚠️ <b>Archive ${escapeHtml(category.name)}?</b>\n\nThis hides the category and disables/archives its ${category._count.products} product(s). Existing purchase history remains.`,
+      `⚠️ <b>${smallCaps("Archive")} ${escapeHtml(category.name)}?</b>\n\n${smallCaps("This hides the category and disables/archives its")} ${category._count.products} ${smallCaps("product(s). Existing purchase history remains.")}`,
       confirmDangerKeyboard(`admin:category:deleteconfirm:${category.id}`, `admin:category:view:${category.id}`),
       deps.logger,
     );
@@ -384,7 +412,7 @@ async function handleAdminCallback(
     if (!categoryId) throw new Error("Category link is invalid.");
     await showCategoryProductsAdmin(ctx, deps, categoryId, Number(parts[4] ?? 0));
   } else if (parts[1] === "product" && parts[2] === "add" && parts[3]) {
-    await beginAdminFlow(ctx, deps, { kind: "product:create:name", categoryId: parts[3] }, `📦 <b>${smallCaps("Add product")}</b>\n\nSend a product name (2–120 characters).`);
+    await beginAdminFlow(ctx, deps, { kind: "product:create:name", categoryId: parts[3] }, `📦 <b>${smallCaps("Add product")}</b>\n\n${smallCaps("Send a product name (2–120 characters).")}`);
   } else if (data.startsWith("admin:products:")) {
     await showProductsAdmin(ctx, deps, Number(parts[2] ?? 0));
   } else if (parts[1] === "product" && parts[2] === "view" && parts[3]) {
@@ -419,14 +447,14 @@ async function handleAdminCallback(
       : null;
     if (!flow) throw new Error("Unknown product field.");
     const prompts: Record<string, string> = {
-      name: "✏️ Send the new product name.",
-      description: "📝 Send the new description, or /skip to clear it.",
-      plan: "💎 Send the Account / Plan Specs shown on the product card and receipt (e.g. <code>Mega Fan · Ad-Free · 4K · 30 Days</code>), or /skip to clear it.",
-      instructions: "📜 Send the Login Guide & Rules delivered to buyers upon purchase (e.g. <code>• Do NOT change password\n• Use 1 screen</code>), or /skip to clear it.",
-      warranty: "🛡 Send the replacement warranty window in whole hours (0–8,760). Example: <code>24</code> for 24h, <code>720</code> for 30 days, or <code>0</code> for no warranty.",
-      media: "🖼 Upload a photo now to set as the product banner, or send /skip to remove the current banner.",
-      price: "💳 Send the new whole-credit price (0–1,000,000,000).",
-      emoji: "🎨 Send the new product icon, or /skip to use ✦.",
+      name: `✏️ ${smallCaps("Send the new product name.")}`,
+      description: `📝 ${smallCaps("Send the new description, or /skip to clear it.")}`,
+      plan: `💎 ${smallCaps("Send the account / plan specs shown on the product card and receipt (for example:")} <code>Mega Fan · Ad-Free · 4K · 30 Days</code>${smallCaps("). Or /skip to clear it.")}`,
+      instructions: `📜 ${smallCaps("Send the login guide and rules delivered to buyers upon purchase (for example:")} <code>• Do NOT change password\n• Use 1 screen</code>${smallCaps("). Or /skip to clear it.")}`,
+      warranty: `🛡 ${smallCaps("Send the replacement warranty window in whole hours (0–8,760). For example:")} <code>24</code> ${smallCaps("for 24 hours,")} <code>720</code> ${smallCaps("for 30 days, or")} <code>0</code> ${smallCaps("for no warranty.")}`,
+      media: `🖼 ${smallCaps("Upload a photo to set as the product banner, or send /skip to remove the current banner.")}`,
+      price: `💳 ${smallCaps("Send the new whole-credit price (0–1,000,000,000).")}`,
+      emoji: `🎨 ${smallCaps("Send the new product icon, or /skip to use ✦.")}`,
     };
     await beginAdminFlow(ctx, deps, flow, prompts[kind]!);
   } else if (parts[1] === "product" && parts[2] === "toggle" && parts[3]) {
@@ -437,9 +465,9 @@ async function handleAdminCallback(
     const product = await getProduct(deps.database.prisma, parts[3]);
     const categories = await listCategories(deps.database.prisma);
     const keyboard = new InlineKeyboard();
-    for (const category of categories) keyboard.text(`${category.emoji} ${category.name}`.slice(0, 55), `admin:product:move:${product.id}:${category.id}`).row();
-    keyboard.text("◀ PRODUCT", `admin:product:view:${product.id}`);
-    await editOrReply(ctx, `🗂 <b>Move ${escapeHtml(product.name)}</b>\n\nChoose a category.`, keyboard, deps.logger);
+    for (const category of categories) keyboard.text(smallCaps(`${category.emoji} ${category.name}`).slice(0, 55), `admin:product:move:${product.id}:${category.id}`).row();
+    keyboard.text(smallCaps("◀ PRODUCT"), `admin:product:view:${product.id}`);
+    await editOrReply(ctx, `🗂 <b>${smallCaps("Move")} ${escapeHtml(product.name)}</b>\n\n${smallCaps("Choose a category.")}`, keyboard, deps.logger);
   } else if (parts[1] === "product" && parts[2] === "move" && parts[3] && parts[4]) {
     await updateProduct(deps.database.prisma, parts[3], { categoryId: parts[4] });
     await showProductAdmin(ctx, deps, parts[3]);
@@ -447,7 +475,7 @@ async function handleAdminCallback(
     const product = await getProduct(deps.database.prisma, parts[3]);
     await editOrReply(
       ctx,
-      `⚠️ <b>Archive ${escapeHtml(product.name)}?</b>\n\nThis hides the product from the store and preserves existing purchases and inventory records.`,
+      `⚠️ <b>${smallCaps("Archive")} ${escapeHtml(product.name)}?</b>\n\n${smallCaps("This hides the product from the store and preserves existing purchases and inventory records.")}`,
       confirmDangerKeyboard(`admin:product:deleteconfirm:${product.id}`, `admin:product:view:${product.id}`),
       deps.logger,
     );
@@ -464,14 +492,14 @@ async function handleAdminCallback(
       ctx,
       deps,
       { kind: "inventory:add:payload", productId: product.id },
-      `📥 <b>Add authorized stock: ${escapeHtml(product.name)}</b>\n\n` +
-        `Send one item per line, or upload a .txt/.csv file.\n\n` +
-        `💡 <b>Supported formats (auto-parsed for buyers):</b>\n` +
-        `• Classic: <code>email@domain.com:password</code>\n` +
-        `• With account details:\n<code>email:pass | Plan: Mega Fan | Expiry: 2027-01-15 | Region: US | Profile: #2 | PIN: 1234</code>\n` +
-        `• Colon-extended: <code>email:pass:Mega Fan:2027-01-15</code>\n` +
-        `• License key / code: <code>KEY-XXXX-YYYY-ZZZZ</code>\n\n` +
-        `Maximum 500 lines per batch, 3,500 characters per item. Use /cancel to stop.`,
+      `📥 <b>${smallCaps("Add authorized stock:")} ${escapeHtml(product.name)}</b>\n\n` +
+        `${smallCaps("Send one item per line, or upload a .txt/.csv file.")}\n\n` +
+        `💡 <b>${smallCaps("Supported formats (auto-parsed for buyers):")}</b>\n` +
+        `• ${smallCaps("Classic:")} <code>email@domain.com:password</code>\n` +
+        `• ${smallCaps("With account details:")}\n<code>email:pass | Plan: Mega Fan | Expiry: 2027-01-15 | Region: US | Profile: #2 | PIN: 1234</code>\n` +
+        `• ${smallCaps("Colon-extended:")} <code>email:pass:Mega Fan:2027-01-15</code>\n` +
+        `• ${smallCaps("License key / code:")} <code>KEY-XXXX-YYYY-ZZZZ</code>\n\n` +
+        `${smallCaps("Maximum 500 lines per batch, 3,500 characters per item. Use /cancel to stop.")}`,
     );
   } else if (parts[1] === "stock" && parts[2] === "list" && parts[3]) {
     await showInventoryList(ctx, deps, parts[3], Number(parts[4] ?? 0));
@@ -480,18 +508,38 @@ async function handleAdminCallback(
   } else if (parts[1] === "stock" && parts[2] === "export" && parts[3]) {
     const { product, payloads } = await listAllAvailablePayloads(deps.database.prisma, parts[3]);
     if (!payloads.length) {
-      await editOrReply(ctx, `⚠️ No available stock to export for <b>${escapeHtml(product.name)}</b>.`, new InlineKeyboard().text("◀ PRODUCT", `admin:product:view:${product.id}`), deps.logger);
+      await editOrReply(ctx, `⚠️ No available stock to export for <b>${escapeHtml(product.name)}</b>.`, new InlineKeyboard().text(smallCaps("◀ PRODUCT"), `admin:product:view:${product.id}`), deps.logger);
       return true;
     }
     const filename = `stock-${escapeFilenamePart(product.name)}-${Date.now()}.txt`;
-    await ctx.replyWithDocument(new InputFile(Buffer.from(payloads.join("\n") + "\n", "utf8"), filename), {
-      caption: `📤 Exported ${payloads.length} available stock item(s) for ${product.emoji} ${product.name}. Keep this file private.`,
-    });
+    const stockFile = Buffer.from(payloads.join("\n") + "\n", "utf8");
+    const caption = `📤 ${smallCaps("Exported")} ${payloads.length} ${smallCaps("available stock item(s) for")} ${product.emoji} ${product.name}. ${smallCaps("Keep this file private.")}`;
+    try {
+      await ctx.replyWithRichMessage({
+        blocks: [
+          richHeading("📤 Stock export ready", 1),
+          richKeyValueTable([
+            ["Product", `${product.emoji} ${product.name}`],
+            ["Items exported", payloads.length.toLocaleString("en-US")],
+            ["File", filename],
+          ], "Export manifest"),
+          richParagraph("This file contains private inventory payloads. Keep it secure.", true),
+          {
+            type: "document",
+            document: { type: "document", media: new InputFile(stockFile, filename) },
+            caption: { text: caption },
+          },
+        ],
+      });
+    } catch (error) {
+      deps.logger.debug({ err: error }, "Rich stock export failed; using a standard document message");
+      await ctx.replyWithDocument(new InputFile(stockFile, filename), { caption });
+    }
   } else if (parts[1] === "stock" && parts[2] === "clear" && parts[3]) {
     const product = await getProduct(deps.database.prisma, parts[3]);
     await editOrReply(
       ctx,
-      `⚠️ <b>Clear all ${product._count.inventory} available stock item(s) for ${escapeHtml(product.name)}?</b>\n\nSold history is preserved; only unsold available items will be removed.`,
+      `⚠️ <b>${smallCaps("Clear all")} ${product._count.inventory} ${smallCaps("available stock item(s) for")} ${escapeHtml(product.name)}?</b>\n\n${smallCaps("Sold history is preserved; only unsold available items will be removed.")}`,
       confirmDangerKeyboard(`admin:stock:clearconfirm:${product.id}`, `admin:stock:list:${product.id}:0`),
       deps.logger,
     );
@@ -500,16 +548,16 @@ async function handleAdminCallback(
     await showInventoryList(ctx, deps, parts[3], 0);
   } else if (parts[1] === "stock" && parts[2] === "announce" && parts[3]) {
     const product = await getProduct(deps.database.prisma, parts[3]);
-    const text = `🔥 RESTOCK ALERT 🔥\n\n${product.emoji} ${product.name} is now in stock!\n` +
+    const text = `🔥 ${smallCaps("Restock alert")} 🔥\n\n${product.emoji} ${product.name} ${smallCaps("is now in stock!")}\n` +
       (product.planDetails ? `💎 ${product.planDetails}\n` : "") +
-      `💳 Price: ${product.price} credits\n` +
-      `📦 Available: ${product._count.inventory} in stock\n\n` +
-      `Use /store to grab yours before it sells out!`;
+      `💳 ${smallCaps("Price")}: ${creditLabel(product.price)}\n` +
+      `📦 ${smallCaps("Available")}: ${product._count.inventory} ${smallCaps("in stock")}\n\n` +
+      `${smallCaps("Use /store to browse the catalogue.")}`;
     ctx.session.adminFlow = { kind: "broadcast:confirm", text };
     await editOrReply(
       ctx,
-      `📢 <b>Preview restock announcement</b>\n\n${escapeHtml(text)}`,
-      new InlineKeyboard().text("📢 SEND TO USERS", "admin:broadcast:send").text("❌ CANCEL", "admin:broadcast:cancel"),
+      `📢 <b>${smallCaps("Preview restock announcement")}</b>\n\n${escapeHtml(text)}`,
+      new InlineKeyboard().text(smallCaps("📢 SEND TO USERS"), "admin:broadcast:send").text(smallCaps("❌ CANCEL"), "admin:broadcast:cancel"),
       deps.logger,
     );
   } else if (parts[1] === "stock" && parts[2] === "remove" && parts[3]) {
@@ -520,7 +568,7 @@ async function handleAdminCallback(
     if (!item) throw new NotFoundError("That available stock item no longer exists.");
     await editOrReply(
       ctx,
-      `⚠️ <b>Remove stock item ${item.id.slice(0, 8)}?</b>\n\nProduct: ${escapeHtml(item.product.name)}. Its payload will not be shown here.`,
+      `⚠️ <b>${smallCaps("Remove stock item")} ${item.id.slice(0, 8)}?</b>\n\n${smallCaps("Product:")} ${escapeHtml(item.product.name)}. ${smallCaps("Its payload will not be shown here.")}`,
       confirmDangerKeyboard(`admin:stock:removeconfirm:${item.id}`, `admin:stock:list:${item.productId}:0`),
       deps.logger,
     );
@@ -533,30 +581,55 @@ async function handleAdminCallback(
     await showWarrantyClaimDetail(ctx, deps, parts[3]);
   } else if (data.startsWith("admin:warranty:replace:") && parts[3]) {
     const resolved = await resolveWarrantyClaimReplace(deps.database.prisma, parts[3]);
-    await ctx.api.sendMessage(
-      Number(resolved.buyerTelegramId),
-      `🔄 <b>${smallCaps("Warranty replacement delivered")}</b>\n\n` +
-        `Your claim for ${escapeHtml(resolved.product.emoji)} <b>${escapeHtml(resolved.product.name)}</b> (<code>#${escapeHtml(resolved.purchaseId.slice(0, 8))}</code>) was approved!\n\n` +
-        `🔐 <b>${smallCaps("Your new replacement delivery")}</b>\n` +
-        renderParsedPayloadBlock(resolved.replacementPayload),
-      {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard()
-          .text("📄 DOWNLOAD .TXT", `order:txt:${resolved.purchaseId}`)
-          .text("📦 VIEW ORDER", `order:view:${resolved.purchaseId}`),
-      },
-    ).catch((err: unknown) => deps.logger.warn({ err }, "Could not notify buyer of warranty replacement"));
+    const replacementFallback = `🔄 <b>${smallCaps("Warranty replacement delivered")}</b>\n\n` +
+      `${smallCaps("Your claim for")} ${escapeHtml(resolved.product.emoji)} <b>${escapeHtml(resolved.product.name)}</b> (<code>#${escapeHtml(resolved.purchaseId.slice(0, 8))}</code>) ${smallCaps("was approved!")}\n\n` +
+      `🔐 <b>${smallCaps("Your new replacement delivery")}</b>\n` +
+      renderParsedPayloadBlock(resolved.replacementPayload);
+    const replacementKeyboard = new InlineKeyboard()
+      .text(smallCaps("📄 Download .txt"), `order:txt:${resolved.purchaseId}`)
+      .text(smallCaps("📦 View order"), `order:view:${resolved.purchaseId}`);
+    await sendRichOrLegacy(ctx, Number(resolved.buyerTelegramId), {
+      blocks: [
+        richHeading("🔄 Warranty replacement delivered", 1),
+        richParagraph([smallCaps("Your claim for "), resolved.product.emoji, " ", resolved.product.name, smallCaps(" was approved.")]),
+        richKeyValueTable([
+          ["Order", `#${resolved.purchaseId.slice(0, 8)}`],
+          ["Status", smallCaps("Approved · replacement issued")],
+        ], "Claim result"),
+        richHeading("🔐 Your new replacement delivery", 2),
+        ...richCredentialBlocks(resolved.replacementPayload),
+        richButtonRow([
+          richCallbackButton("📄 Download .txt", `order:txt:${resolved.purchaseId}`, "primary"),
+          richCallbackButton("📦 View order", `order:view:${resolved.purchaseId}`, "link"),
+        ]),
+      ],
+    }, replacementFallback, {
+      fallbackKeyboard: replacementKeyboard,
+      logger: deps.logger,
+    }).catch((err: unknown) => deps.logger.warn({ err }, "Could not notify buyer of warranty replacement"));
     await showWarrantyClaimDetail(ctx, deps, parts[3]);
   } else if (data.startsWith("admin:warranty:refund:")) {
     throw new ValidationError("Refunds are not offered. Review the claim for a stock replacement or reject it.");
   } else if (data.startsWith("admin:warranty:reject:") && parts[3]) {
     const resolved = await resolveWarrantyClaimReject(deps.database.prisma, parts[3]);
-    await ctx.api.sendMessage(
-      Number(resolved.buyerTelegramId),
-      `ℹ️ <b>${smallCaps("Warranty claim update")}</b>\n\n` +
-        `Your claim for ${escapeHtml(resolved.product.emoji)} <b>${escapeHtml(resolved.product.name)}</b> (<code>#${escapeHtml(resolved.purchaseId.slice(0, 8))}</code>) was declined by the store owner.`,
-      { parse_mode: "HTML", reply_markup: mainKeyboard() },
-    ).catch((err: unknown) => deps.logger.warn({ err }, "Could not notify buyer of warranty rejection"));
+    const rejectionFallback = `ℹ️ <b>${smallCaps("Warranty claim update")}</b>\n\n` +
+      `${smallCaps("Your claim for")} ${escapeHtml(resolved.product.emoji)} <b>${escapeHtml(resolved.product.name)}</b> (<code>#${escapeHtml(resolved.purchaseId.slice(0, 8))}</code>) ${smallCaps("was declined by the store owner.")}`;
+    await sendRichOrLegacy(ctx, Number(resolved.buyerTelegramId), {
+      blocks: [
+        richHeading("ℹ️ Warranty claim update", 1),
+        richKeyValueTable([
+          ["Product", `${resolved.product.emoji} ${resolved.product.name}`],
+          ["Order", `#${resolved.purchaseId.slice(0, 8)}`],
+          ["Status", smallCaps("Declined by the store owner")],
+        ], "Claim result"),
+        richParagraph("If you still need help, contact store support with your order reference.", true),
+        richButtonRow([
+          richCallbackButton("📦 My orders", "nav:orders"),
+          richCallbackButton("🏠 Home", "nav:home", "link"),
+        ]),
+      ],
+    }, rejectionFallback, { fallbackKeyboard: mainKeyboard(), logger: deps.logger })
+      .catch((err: unknown) => deps.logger.warn({ err }, "Could not notify buyer of warranty rejection"));
     await showWarrantyClaimDetail(ctx, deps, parts[3]);
   } else if (data.startsWith("admin:warranty:")) {
     await showWarrantyClaimsAdmin(ctx, deps, Number(parts[2] ?? 0));
@@ -593,7 +666,7 @@ async function handleAdminCallback(
     await beginAdminFlow(ctx, deps, { kind: "broadcast:message" }, "📢 Send the plain-text broadcast now. It will be previewed before sending.");
   } else if (data === "admin:broadcast:cancel") {
     ctx.session.adminFlow = null;
-    await editOrReply(ctx, "Broadcast cancelled. No users were contacted.", adminPanelKeyboard(), deps.logger);
+    await editOrReply(ctx, smallCaps("Broadcast cancelled. No users were contacted."), adminPanelKeyboard(), deps.logger);
   } else if (data === "admin:broadcast:send") {
     const flow = ctx.session.adminFlow;
     if (!flow || flow.kind !== "broadcast:confirm") throw new Error("Broadcast preview expired. Use /broadcast again.");
@@ -601,10 +674,10 @@ async function handleAdminCallback(
     await startBroadcast(ctx, deps, flow.text);
   } else if (data === "admin:flow:cancel") {
     ctx.session.adminFlow = null;
-    await editOrReply(ctx, "Form cancelled.", adminPanelKeyboard(), deps.logger);
+    await editOrReply(ctx, smallCaps("Form cancelled."), adminPanelKeyboard(), deps.logger);
   } else if (data === "admin:export") {
     await sendStoreExport(ctx, deps);
-    await editOrReply(ctx, "✅ Store export sent above. Keep the file secure; it contains inventory payloads.", adminPanelKeyboard(), deps.logger);
+    await editOrReply(ctx, smallCaps("✅ Store export sent above. Keep the file secure; it contains inventory payloads."), adminPanelKeyboard(), deps.logger);
   } else if (data === "admin:restart") {
     await requestRestart(ctx, bot, deps);
   } else if (data === "admin:reset") {
@@ -632,25 +705,51 @@ async function startBroadcast(ctx: BotContext, deps: BotDependencies, text: stri
       lastProgressAt = Date.now();
       if (chatId === undefined || messageId === undefined) return;
       const progressText = `📢 <b>${smallCaps("Broadcast in progress")}</b>\n\n` +
-        `Processed ${progress.processed}/${progress.total}\n✅ Delivered ${progress.delivered}\n⚠️ Failed ${progress.failed}`;
-      try {
-        await ctx.api.editMessageText(chatId, messageId, progressText, { parse_mode: "HTML", reply_markup: adminPanelKeyboard() });
-      } catch (error) {
-        if (!(error instanceof GrammyError) || !/message is not modified/i.test(error.description)) {
-          deps.logger.debug({ err: error }, "Broadcast progress message could not be updated");
-        }
-      }
+        `${smallCaps("Processed")} ${progress.processed}/${progress.total}\n✅ ${smallCaps("Delivered")} ${progress.delivered}\n⚠️ ${smallCaps("Failed")} ${progress.failed}`;
+      const progressMessage = {
+        blocks: [
+          richHeading("📢 Broadcast in progress", 1),
+          richKeyValueTable([
+            ["Processed", `${progress.processed}/${progress.total}`],
+            ["Delivered", progress.delivered.toLocaleString("en-US")],
+            ["Failed", progress.failed.toLocaleString("en-US")],
+          ], "Delivery progress"),
+          richButtonRow([richCallbackButton("◀ Owner console", "admin:panel", "link")]),
+        ],
+      };
+      await editMessageRichOrLegacy(ctx, chatId, messageId, progressMessage, progressText, {
+        fallbackKeyboard: adminPanelKeyboard(),
+        logger: deps.logger,
+      });
     });
-    const finalText = `✅ <b>${smallCaps("Broadcast complete")}</b>\n\nProcessed ${result.processed}/${result.total}\n✅ Delivered ${result.delivered}\n⚠️ Failed ${result.failed}`;
+    const finalText = `✅ <b>${smallCaps("Broadcast complete")}</b>\n\n` +
+      `${smallCaps("Processed")} ${result.processed}/${result.total}\n✅ ${smallCaps("Delivered")} ${result.delivered}\n⚠️ ${smallCaps("Failed")} ${result.failed}`;
+    const finalMessage = {
+      blocks: [
+        richHeading("✅ Broadcast complete", 1),
+        richKeyValueTable([
+          ["Processed", `${result.processed}/${result.total}`],
+          ["Delivered", result.delivered.toLocaleString("en-US")],
+          ["Failed", result.failed.toLocaleString("en-US")],
+        ], "Delivery summary"),
+        richButtonRow([richCallbackButton("◀ Owner console", "admin:panel", "link")]),
+      ],
+    };
     if (chatId !== undefined && messageId !== undefined) {
-      await ctx.api.editMessageText(chatId, messageId, finalText, { parse_mode: "HTML", reply_markup: adminPanelKeyboard() }).catch(() => undefined);
+      await editMessageRichOrLegacy(ctx, chatId, messageId, finalMessage, finalText, {
+        fallbackKeyboard: adminPanelKeyboard(),
+        logger: deps.logger,
+      }).catch(() => undefined);
     } else {
-      await ctx.reply(finalText, { parse_mode: "HTML", reply_markup: adminPanelKeyboard() });
+      await replyRichOrLegacy(ctx, finalMessage, finalText, {
+        fallbackKeyboard: adminPanelKeyboard(),
+        logger: deps.logger,
+      });
     }
     deps.logger.info({ ...result, ownerId: deps.config.ownerId.toString() }, "Broadcast completed");
   } catch (error) {
     deps.logger.error({ err: error }, "Broadcast failed");
-    await editOrReply(ctx, "⚠️ Broadcast stopped after an internal error. Check logs; already delivered messages cannot be recalled.", adminPanelKeyboard(), deps.logger);
+    await editOrReply(ctx, smallCaps("⚠️ Broadcast stopped after an internal error. Check logs; already delivered messages cannot be recalled."), adminPanelKeyboard(), deps.logger);
   }
 }
 
@@ -665,7 +764,7 @@ export function registerCallbacks(bot: Bot<BotContext>, deps: BotDependencies): 
     }
     const ownerAction = data.startsWith("admin:") || data.startsWith("reset:");
     if (ownerAction && !isOwner(ctx, deps.config)) {
-      await ctx.answerCallbackQuery({ text: "⛔ Owner access only.", show_alert: true }).catch(() => undefined);
+      await ctx.answerCallbackQuery({ text: smallCaps("⛔ Owner access only."), show_alert: true }).catch(() => undefined);
       return;
     }
     if (!(await requirePrivate(ctx))) return;
@@ -684,16 +783,16 @@ export function registerCallbacks(bot: Bot<BotContext>, deps: BotDependencies): 
         } else if (resetParts[0] === "reset" && resetParts[1] === "cancel" && resetParts[2]) {
           await cancelReset(ctx, deps, resetParts[2]);
         } else {
-          await editOrReply(ctx, "That button has expired. Please open the menu again.", mainKeyboard(), deps.logger);
+          await editOrReply(ctx, smallCaps("That button has expired. Please open the menu again."), mainKeyboard(), deps.logger);
         }
       }
     } catch (error) {
       if (error instanceof DomainError) {
-        await editOrReply(ctx, `⚠️ ${escapeHtml(error.message)}`, adminKeyboardFor(data), deps.logger);
+        await editOrReply(ctx, `⚠️ ${escapeHtml(smallCaps(error.message))}`, adminKeyboardFor(data), deps.logger);
         return;
       }
       deps.logger.error({ err: error, callbackType: data.split(":").slice(0, 2).join(":"), telegramId: ctx.from?.id }, "Callback handler failed");
-      await editOrReply(ctx, "⚠️ Something went wrong. Please try again or use /help.", adminKeyboardFor(data), deps.logger);
+      await editOrReply(ctx, smallCaps("⚠️ Something went wrong. Please try again or use /help."), adminKeyboardFor(data), deps.logger);
     }
   });
 }

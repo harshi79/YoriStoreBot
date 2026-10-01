@@ -2,14 +2,16 @@ export function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 
+const SMALL_CAPS_MAP: Readonly<Record<string, string>> = {
+  a: "ᴀ", b: "ʙ", c: "ᴄ", d: "ᴅ", e: "ᴇ", f: "ꜰ", g: "ɢ", h: "ʜ",
+  i: "ɪ", j: "ᴊ", k: "ᴋ", l: "ʟ", m: "ᴍ", n: "ɴ", o: "ᴏ", p: "ᴘ",
+  q: "ꞯ", r: "ʀ", s: "ꜱ", t: "ᴛ", u: "ᴜ", v: "ᴠ", w: "ᴡ", x: "x",
+  y: "ʏ", z: "ᴢ",
+};
+
+/** Transliterates Latin UI copy to Unicode small-cap glyphs without changing other scripts. */
 export function smallCaps(value: string): string {
-  const map: Record<string, string> = {
-    a: "ᴀ", b: "ʙ", c: "ᴄ", d: "ᴅ", e: "ᴇ", f: "ғ", g: "ɢ", h: "ʜ",
-    i: "ɪ", j: "ᴊ", k: "ᴋ", l: "ʟ", m: "ᴍ", n: "ɴ", o: "ᴏ", p: "ᴘ",
-    q: "ǫ", r: "ʀ", s: "s", t: "ᴛ", u: "ᴜ", v: "ᴠ", w: "ᴡ", x: "x",
-    y: "ʏ", z: "ᴢ",
-  };
-  return [...value].map((char) => map[char.toLowerCase()] ?? char).join("");
+  return [...value].map((char) => SMALL_CAPS_MAP[char.toLowerCase()] ?? char).join("");
 }
 
 export function safeText(value: string | null | undefined, fallback = "Not set"): string {

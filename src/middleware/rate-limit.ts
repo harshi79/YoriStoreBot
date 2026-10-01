@@ -1,5 +1,8 @@
 import type { BotContext } from "../types/context.js";
 import type { MiddlewareFn } from "grammy";
+import { replyRichOrLegacy } from "../bot/render.js";
+import { richHeading, richParagraph } from "../messages/rich-ui.js";
+import { smallCaps } from "../utils/format.js";
 
 const COMMAND_LIMITS: Record<string, number> = {
   bonus: 1_000,
@@ -43,9 +46,11 @@ export function createRateLimitMiddleware(): MiddlewareFn<BotContext> {
     const previous = lastCall.get(key) ?? 0;
     if (now - previous < interval) {
       if (ctx.callbackQuery) {
-        await ctx.answerCallbackQuery({ text: "One moment, please.", show_alert: false }).catch(() => undefined);
+        await ctx.answerCallbackQuery({ text: smallCaps("One moment, please."), show_alert: false }).catch(() => undefined);
       } else {
-        await ctx.reply("One moment, please.");
+        await replyRichOrLegacy(ctx, {
+          blocks: [richHeading("⏳ One moment", 1), richParagraph("Please wait a moment before trying that again.", true)],
+        }, smallCaps("One moment, please."));
       }
       return;
     }

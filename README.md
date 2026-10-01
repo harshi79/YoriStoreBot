@@ -38,15 +38,14 @@ Set `MINI_APP_TEST_URL` if the preview uses a port other than 3001. The browser 
 ### Connect the live Telegram Mini App
 
 1. Configure a real `BOT_TOKEN`, the same PostgreSQL `DATABASE_URL` as your bot, `NODE_ENV=production`, `PORT`, and `MINI_APP_URL=https://YOUR_PUBLIC_DOMAIN` on the host. Never place secrets in a `VITE_*` variable.
-2. Back up/stop the old bot. Apply **all** migrations (including `20261002010000_mini_app_wishlist`), build and start:
+2. Back up/stop the old bot, then build and start. `npm start` applies **all** committed migrations (including `20261002000000_purchase_batches` and `20261002010000_mini_app_wishlist`) before booting:
 
    ```sh
-   npm run db:deploy
    npm run build
    npm start
    ```
 
-   `build` is now a normal one-shot command that generates Prisma Client, typechecks both projects, compiles the bot, and builds the Mini App. Use **`npm start`**, not `npm run build`, as the host’s Start Command.
+   `build` is now a normal one-shot command that generates Prisma Client, typechecks both projects, compiles the bot, and builds the Mini App. Use **`npm start`**, not `npm run build`, as the host’s Start Command — a host that only ever runs the start command still gets its migrations applied, which is what previously left production stuck on "Database schema is not ready". Prefer to migrate in a separate release step? Run `npm run db:deploy` yourself and set `SKIP_DB_MIGRATIONS=1`.
 3. Expose the Node `PORT` over HTTPS. It serves the built frontend, API and `/health` readiness endpoint. Telegram clients and Arena previews may embed it; no iframe-denying header is set.
 4. In @BotFather, configure your bot’s Main Mini App to that public HTTPS URL. Restart the bot: it registers an **Open Iris** Telegram menu button and adds `/app` plus an inline Mini App button to `/start`.
 5. Open the app from that bot to supply valid Telegram-signed login data. A normal production browser does not get a fake account or demo login.
@@ -97,6 +96,7 @@ The sole authorized owner is fixed at Telegram ID `7728424218`; all owner comman
 | `BONUS_PERIOD_HOURS` | No | `24` | Default bonus cooldown, 1–720 hours |
 | `DATABASE_POOL_SIZE` | No | `10` | PostgreSQL connection pool size |
 | `PM2_APP_NAME` | No | empty | Exact PM2 app name for the optional `/restart` command |
+| `SKIP_DB_MIGRATIONS` | No | empty | Set to `1` to stop `npm start` from running `prisma migrate deploy` when the host migrates separately |
 | `MINI_APP_URL` | For the live Mini App | empty | Public HTTPS address used by `/app`, `/start`, and the Telegram menu button |
 | `PORT` | For web hosting | `3000` when `MINI_APP_URL` is set | Node frontend/API/health listener |
 
@@ -109,17 +109,22 @@ The bonus settings can also be changed from the owner panel; those overrides are
 - **Tests:** explicitly selecting `NODE_ENV=test` permits in-memory PGlite. Both configuration loading and the database factory default to production safety when no environment is passed.
 - **Health checks:** the HTTP listener, when `PORT` is supplied, returns `503` until database/schema checks and Telegram setup finish and polling starts. It returns `503` again while polling is stopped/retrying or the bot is shutting down. Invalid configuration exits before opening the listener.
 
-Production startup only checks schema readiness; it does not create or upgrade tables. Back up the database and stop the previous bot process, then apply the committed migrations **before** starting the new build:
+`npm start` applies the committed migrations with `prisma migrate deploy` before booting, because many hosts only run the package start command and never reach `npm run db:deploy` — which leaves production refusing to start with "Database schema is not ready". That command is the official, non-destructive one: it never resets, pushes, or generates, Prisma takes an advisory lock so concurrent instances cannot race, and re-running it with nothing pending is a no-op.
+
+The bot process itself still only *checks* schema readiness and never creates or upgrades tables, so a migration that cannot be applied stops the deploy instead of serving traffic on an old schema. Back up the database and stop the previous bot process before a deploy that changes the schema:
 
 ```sh
-npm run db:deploy
 npm run build
-npm start
+npm start   # runs prisma migrate deploy, then starts the bot
 ```
+
+Set `SKIP_DB_MIGRATIONS=1` when your host applies migrations in a separate release step. If the Prisma CLI or its native schema engine cannot run at all — for example when `https://binaries.prisma.sh` is blocked — `npm start` warns and boots anyway, leaving the bot's own schema check as the final gate.
 
 The purchase-batch migration (`20261002000000_purchase_batches`) preserves existing purchases, stock, balances, and ledger entries, and backfills safely matched legacy bulk deliveries. New bulk items have a persistent batch ID and item index, so retry reconstruction does not depend on the requested quantity or a process-local session.
 
-If an older deployment created PostgreSQL tables automatically without Prisma migration history, back up the database and verify its schema matches the initial migration before baselining it with `npx prisma migrate resolve --applied 20260930000000_init`. Then run `npm run db:deploy` to actually apply the purchase-batch migration. Do not mark the new migration applied without running it.
+If an older deployment created PostgreSQL tables automatically without Prisma migration history, `npm start` recovers on its own: `prisma migrate deploy` stops on the first migration whose objects already exist, that migration is recorded as applied with `prisma migrate resolve --applied <migration>`, and the deploy is retried until the remaining migrations run. Only genuine "already exists" conflicts trigger this — an unreachable database or any other failure stops the start.
+
+To do the same recovery by hand, back up the database and verify its schema matches the initial migration before baselining it with `npx prisma migrate resolve --applied 20260930000000_init`. Then run `npm run db:deploy` to actually apply the purchase-batch migration. Do not mark a migration applied unless its objects really exist.
 
 ## User features
 

@@ -21,12 +21,12 @@ import {
 } from "../src/services/store.service.js";
 import {
   getUserPurchaseDetail, listWarrantyClaims, purchaseProduct,
-  resolveWarrantyClaimRefund, resolveWarrantyClaimReplace, submitWarrantyClaim,
+  resolveWarrantyClaimReplace, submitWarrantyClaim,
 } from "../src/services/purchases.service.js";
 import { buildOrderReceiptText, parseDeliveryPayload } from "../src/utils/credential-parser.js";
 import { claimDailyBonus } from "../src/services/bonus.service.js";
 import { createRedeemCodes, redeemCode } from "../src/services/codes.service.js";
-import { changeCredits, giftAllActiveUsers, giftCredits, MAX_CREDITS, removeCredits } from "../src/services/credits.service.js";
+import { changeCredits, giftAllActiveUsers, giftCredits, listUserCreditTransactions, MAX_CREDITS, removeCredits } from "../src/services/credits.service.js";
 import { updateBonusSettings, getBonusSettings } from "../src/services/settings.service.js";
 import { cancelResetChallenge, createResetChallenge, advanceResetChallenge, performConfirmedReset } from "../src/services/admin.service.js";
 import { buildStoreExport } from "../src/services/export.service.js";
@@ -480,6 +480,45 @@ describe("credits, bonuses, and redeem codes", () => {
     expect(await prisma.creditTransaction.count({ where: { userId: user.id } })).toBe(2);
   });
 
+  it("lists each user's credit ledger newest-first with bounded pagination", async () => {
+    const user = await makeUser(20_010n);
+    const otherUser = await makeUser(20_011n);
+    const baseTime = Date.now();
+    await prisma.creditTransaction.createMany({
+      data: Array.from({ length: 5 }, (_, index) => ({
+        id: `wallet-ledger-${index}`,
+        userId: user.id,
+        amount: index % 2 === 0 ? 10 : -5,
+        type: index % 2 === 0 ? "BONUS" as const : "PURCHASE" as const,
+        description: `activity ${index}`,
+        balanceAfter: 50 + index,
+        createdAt: new Date(baseTime + index * 1_000),
+      })),
+    });
+    await prisma.creditTransaction.create({
+      data: {
+        id: "wallet-other-user",
+        userId: otherUser.id,
+        amount: 99,
+        type: "GIFT",
+        description: "private to another user",
+        balanceAfter: 99,
+      },
+    });
+
+    const firstPage = await listUserCreditTransactions(prisma, user.id, 0, 2);
+    expect(firstPage).toMatchObject({ total: 5, page: 0, pages: 3 });
+    expect(firstPage.transactions.map((entry) => entry.description)).toEqual(["activity 4", "activity 3"]);
+
+    const secondPage = await listUserCreditTransactions(prisma, user.id, 1, 2);
+    expect(secondPage.transactions.map((entry) => entry.description)).toEqual(["activity 2", "activity 1"]);
+
+    const outOfRangePage = await listUserCreditTransactions(prisma, user.id, 100, 2);
+    expect(outOfRangePage).toMatchObject({ page: 2, pages: 3 });
+    expect(outOfRangePage.transactions.map((entry) => entry.description)).toEqual(["activity 0"]);
+    expect(JSON.stringify(firstPage)).not.toContain("private to another user");
+  });
+
   it("updates bonus settings transactionally and reads them back", async () => {
     await updateBonusSettings(prisma, { credits: 80, periodHours: 48 });
     await expect(getBonusSettings(prisma, { credits: 25, periodHours: 24 })).resolves.toEqual({ credits: 80, periodHours: 48 });
@@ -850,6 +889,57 @@ describe("Telegram authorization and callback ownership", () => {
   });
 });
 
+describe("customer wallet activity", () => {
+  it("shows a private, escaped, paginated wallet history from /wallet and its callback", async () => {
+    const user = await makeUser(95_001n, 250);
+    const otherUser = await makeUser(95_002n, 900);
+    const baseTime = Date.now();
+    await prisma.creditTransaction.createMany({
+      data: Array.from({ length: 9 }, (_, index) => ({
+        id: `wallet-view-${index}`,
+        userId: user.id,
+        amount: index % 2 === 0 ? 10 : -5,
+        type: index % 2 === 0 ? "BONUS" as const : "PURCHASE" as const,
+        description: index === 8 ? "<script>private</script>&" : `Ledger event ${index}`,
+        balanceAfter: 100 + index,
+        createdAt: new Date(baseTime + index * 1_000),
+      })),
+    });
+    await prisma.creditTransaction.create({
+      data: {
+        id: "wallet-view-other",
+        userId: otherUser.id,
+        amount: 50,
+        type: "GIFT",
+        description: "Other user's private activity",
+        balanceAfter: 950,
+      },
+    });
+
+    const { bot, calls } = makeTestBot();
+    await bot.handleUpdate(privateMessageUpdate(Number(user.telegramId), "/wallet"));
+    const firstPage = calls.filter((call) => call.method === "sendMessage").at(-1);
+    expect(String(firstPage?.payload.text)).toContain("250 ᴄʀᴇᴅɪᴛs");
+    expect(String(firstPage?.payload.text)).toContain("&lt;script&gt;private&lt;/script&gt;&amp;");
+    expect(String(firstPage?.payload.text)).not.toContain("<script>");
+    expect(String(firstPage?.payload.text)).not.toContain("Other user's private activity");
+    expect(String(firstPage?.payload.text)).toContain("Ledger event 7");
+    expect(String(firstPage?.payload.text)).not.toContain("Ledger event 0");
+
+    const markup = firstPage?.payload.reply_markup as {
+      inline_keyboard?: Array<Array<{ text?: string; callback_data?: string }>>;
+    } | undefined;
+    const nextPageData = markup?.inline_keyboard?.flat().find((button) => button.callback_data === "wallet:page:1")?.callback_data;
+    expect(nextPageData).toBe("wallet:page:1");
+    await bot.handleUpdate(privateCallbackUpdate(Number(user.telegramId), nextPageData!));
+
+    const secondPage = calls.filter((call) => call.method === "editMessageText").at(-1);
+    expect(String(secondPage?.payload.text)).toContain("Ledger event 0");
+    expect(String(secondPage?.payload.text)).not.toContain("Ledger event 7");
+    expect(String(secondPage?.payload.text)).not.toContain("Other user's private activity");
+  });
+});
+
 describe("Telegram message editing", () => {
   const logger = {
     trace: vi.fn(), debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn(),
@@ -967,6 +1057,67 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
     expect(txt).toContain("IMPORTANT RULES & LOGIN INSTRUCTIONS");
   });
 
+  it("uses rich tables for product details, confirmation, delivery, and later order history", async () => {
+    const buyer = await makeUser(91_010n, 250);
+    const { product } = await makeProduct("Rich-table streaming", 40);
+    await addInventoryItems(prisma, product.id, ["buyer@example.test:StrongPass123 | Plan: Premium"]);
+    const { bot, calls } = makeTestBot();
+    const telegramId = Number(buyer.telegramId);
+
+    await bot.handleUpdate(privateCallbackUpdate(telegramId, `store:product:${product.id}`));
+    let richCall = calls.filter((call) => call.method === "editMessageText").at(-1);
+    expect(JSON.stringify(richCall?.payload.rich_message)).toContain("table");
+    expect(JSON.stringify(richCall?.payload.rich_message)).toContain("No refunds");
+
+    await bot.handleUpdate(privateCallbackUpdate(telegramId, `buy:start:${product.id}`));
+    richCall = calls.filter((call) => call.method === "editMessageText").at(-1);
+    expect(JSON.stringify(richCall?.payload.rich_message)).toContain("Review before buying");
+    const confirmMarkup = richCall?.payload.reply_markup as {
+      inline_keyboard?: Array<Array<{ callback_data?: string }>>;
+    } | undefined;
+    const confirmData = confirmMarkup?.inline_keyboard?.flat().find((button) => button.callback_data?.startsWith("buy:confirm:"))?.callback_data;
+    expect(confirmData).toBeDefined();
+
+    await bot.handleUpdate(privateCallbackUpdate(telegramId, confirmData!));
+    richCall = calls.filter((call) => call.method === "editMessageText").at(-1);
+    const delivery = JSON.stringify(richCall?.payload.rich_message);
+    expect(delivery).toContain("buyer@example.test");
+    expect(delivery).toContain("StrongPass123");
+    expect(delivery).toContain("table");
+    expect(await prisma.purchase.count({ where: { buyerId: buyer.id } })).toBe(1);
+
+    await bot.handleUpdate(privateCallbackUpdate(telegramId, "nav:orders"));
+    richCall = calls.filter((call) => call.method === "editMessageText").at(-1);
+    expect(JSON.stringify(richCall?.payload.rich_message)).toContain("Purchase history");
+    expect(JSON.stringify(richCall?.payload.rich_message)).toContain("Rich-table streaming");
+    const orderId = await prisma.purchase.findFirstOrThrow({ where: { buyerId: buyer.id } }).then((order) => order.id);
+    const orderMarkup = richCall?.payload.reply_markup as {
+      inline_keyboard?: Array<Array<{ callback_data?: string }>>;
+    } | undefined;
+    expect(orderMarkup?.inline_keyboard?.flat().some((button) => button.callback_data === `order:view:${orderId}`)).toBe(true);
+
+    await bot.handleUpdate(privateCallbackUpdate(telegramId, `order:view:${orderId}`));
+    richCall = calls.filter((call) => call.method === "editMessageText").at(-1);
+    const orderDetail = JSON.stringify(richCall?.payload.rich_message);
+    expect(orderDetail).toContain("Login details");
+    expect(orderDetail).toContain("buyer@example.test");
+    expect(orderDetail).toContain("StrongPass123");
+
+    const lowFundsUser = await makeUser(91_011n, 5);
+    const { product: unaffordableProduct } = await makeProduct("Premium add-on", 20);
+    await addInventoryItems(prisma, unaffordableProduct.id, ["available@item.test:pass"]);
+    await bot.handleUpdate(privateCallbackUpdate(Number(lowFundsUser.telegramId), `buy:start:${unaffordableProduct.id}`));
+    richCall = calls.filter((call) => call.method === "editMessageText").at(-1);
+    expect(JSON.stringify(richCall?.payload.rich_message)).toContain("Short by 15");
+    const unaffordableMarkup = richCall?.payload.reply_markup as {
+      inline_keyboard?: Array<Array<{ callback_data?: string }>>;
+    } | undefined;
+    const unaffordableButtons = unaffordableMarkup?.inline_keyboard?.flat().map((button) => button.callback_data);
+    expect(unaffordableButtons).toContain("nav:bonus");
+    expect(unaffordableButtons?.some((data) => data?.startsWith("buy:confirm:"))).toBe(false);
+    expect(await prisma.purchase.count({ where: { buyerId: lowFundsUser.id } })).toBe(0);
+  });
+
   it("supports cloning products, searching catalog, featured items, peeking stock, and bulk clearing", async () => {
     const { product } = await makeProduct("Crunchyroll 1 Month", 45);
     await applyProductPreset(prisma, product.id, "crunchyroll");
@@ -998,7 +1149,7 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
     expect(await countAvailableInventory(prisma, product.id)).toBe(0);
   });
 
-  it("handles Order Vault inspection and Warranty Claims (auto-replace and credit refund)", async () => {
+  it("keeps Order Vault history and resolves delivery claims with replacement only (no refunds)", async () => {
     const buyer = await makeUser(92_001n, 300);
     const { product } = await makeProduct("Netflix UHD", 80);
     await applyProductPreset(prisma, product.id, "streaming");
@@ -1026,14 +1177,28 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
     expect(detailAfter.inventoryItem.payload).toContain("fresh@nf.com");
     expect(detailAfter.warrantyClaim?.status).toBe("REPLACED");
 
-    // Second order -> test warranty credit refund
+    // A pending issue can be replaced or rejected; there is no refund option or handler.
     await addInventoryItems(prisma, product.id, ["another@nf.com:pass3"]);
     const secondOrder = await purchaseProduct(prisma, buyer.id, product.id, "purchase:nf-2");
     const secondClaim = await submitWarrantyClaim(prisma, buyer.id, secondOrder.purchaseId, "Account locked");
-    const refunded = await resolveWarrantyClaimRefund(prisma, secondClaim.id);
-    expect(refunded.refundedCredits).toBe(80);
-    expect(refunded.newBalance).toBe(220);
-    expect(await prisma.creditTransaction.count({ where: { userId: buyer.id, type: "REFUND", amount: 80 } })).toBe(1);
+    const beforeAttempt = await prisma.user.findUniqueOrThrow({ where: { id: buyer.id } });
+    const { bot, calls } = makeTestBot();
+    await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), `admin:warranty:view:${secondClaim.id}`));
+    const claimDetail = calls.filter((call) => call.method === "editMessageText").at(-1);
+    const claimMarkup = claimDetail?.payload.reply_markup as {
+      inline_keyboard?: Array<Array<{ callback_data?: string }>>;
+    } | undefined;
+    const claimButtons = claimMarkup?.inline_keyboard?.flat().map((button) => button.callback_data);
+    expect(claimButtons).toContain(`admin:warranty:replace:${secondClaim.id}`);
+    expect(claimButtons).toContain(`admin:warranty:reject:${secondClaim.id}`);
+    expect(claimButtons?.some((data) => data?.includes("refund"))).toBe(false);
+
+    await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), `admin:warranty:refund:${secondClaim.id}`));
+    const noRefundResponse = calls.filter((call) => call.method === "editMessageText").at(-1);
+    expect(String(noRefundResponse?.payload.text)).toContain("Refunds are not offered");
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: buyer.id } })).credits).toBe(beforeAttempt.credits);
+    expect((await prisma.warrantyClaim.findUniqueOrThrow({ where: { id: secondClaim.id } })).status).toBe("PENDING");
+    expect(await prisma.creditTransaction.count({ where: { userId: buyer.id, type: "REFUND" } })).toBe(0);
   });
 
   it("lets buyers subscribe to restock alerts and auto-notifies them when the owner adds stock", async () => {

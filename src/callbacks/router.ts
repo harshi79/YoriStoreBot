@@ -38,19 +38,19 @@ import {
   showHome,
   showOrderDetail,
   showOrders,
+  showWallet,
   showProduct,
   showProfile,
   showStore,
   showWarrantyPrompt,
 } from "../bot/views.js";
-import { editOrReply } from "../bot/render.js";
+import { editOrReply, editOrReplyRich } from "../bot/render.js";
 import { beginAdminFlow, handleUserWarrantySubmission } from "../commands/admin-flow.js";
 import { beginReset, cancelReset, completeReset, continueReset, requestRestart, sendStoreExport } from "../commands/admin.js";
 import { broadcastToUsers } from "../services/broadcast.service.js";
 import { changeCredits } from "../services/credits.service.js";
 import {
   purchaseProduct,
-  resolveWarrantyClaimRefund,
   resolveWarrantyClaimReject,
   resolveWarrantyClaimReplace,
 } from "../services/purchases.service.js";
@@ -74,7 +74,13 @@ import { setRedeemCodeEnabled } from "../services/codes.service.js";
 import { findUserByTelegramId } from "../services/users.service.js";
 import { creditLabel, escapeFilenamePart, escapeHtml, smallCaps } from "../utils/format.js";
 import { DomainError, NotFoundError, PriceChangedError, ValidationError } from "../utils/errors.js";
-import { productMessage, purchaseDeliveryMessage, renderParsedPayloadBlock } from "../messages/iris.js";
+import {
+  productMessage,
+  purchaseDeliveryMessage,
+  renderParsedPayloadBlock,
+  richPurchaseConfirmationMessage,
+  richPurchaseDeliveryMessage,
+} from "../messages/iris.js";
 
 function adminKeyboardFor(data: string) {
   return data.startsWith("admin:") || data.startsWith("reset:") ? adminPanelKeyboard() : mainKeyboard();
@@ -111,7 +117,7 @@ async function showPurchaseConfirmation(
   const qtyNote = safeQty > 1
     ? `\n📦 <b>${smallCaps("Quantity")}:</b> ${safeQty}x (${creditLabel(totalCost)} total)`
     : "";
-  const text = `${productMessage({
+  const card = {
     emoji: product.emoji,
     name: product.name,
     category: product.category.name,
@@ -119,10 +125,16 @@ async function showPurchaseConfirmation(
     planDetails: product.planDetails,
     warrantyHours: product.warrantyHours,
     featured: product.featured,
+    isUnlimited: product.isUnlimited,
     price: product.price,
     stock: product._count.inventory,
     credits: user.credits,
-  })}${qtyNote}\n\n🛒 <b>${smallCaps("Confirm this purchase?")}</b>\n${smallCaps("Your credits are charged only when stock is assigned successfully.")}`;
+  };
+  const canAfford = user.credits >= totalCost;
+  const text = `${productMessage(card)}${qtyNote}\n\n` +
+    (canAfford
+      ? `🛒 <b>${smallCaps("Confirm this purchase?")}</b>\n${smallCaps("Credits are charged only if stock is assigned. All sales are final; no refunds.")}`
+      : `⚠️ ${smallCaps("You need")} ${creditLabel(totalCost - user.credits)} ${smallCaps("more to buy this item.")}`);
   const nonce = ctx.session.purchaseConfirmation?.productId === product.id
     ? ctx.session.purchaseConfirmation.nonce
     : randomBytes(8).toString("hex");
@@ -134,10 +146,23 @@ async function showPurchaseConfirmation(
     quantity: safeQty,
     expiresAt: Date.now() + 2 * 60 * 1_000,
   };
-  await editOrReply(
+  const keyboard = canAfford
+    ? confirmPurchaseKeyboard(product.id, nonce, product.price, safeQty, maxAvailable)
+    : new InlineKeyboard().text("🎁 CLAIM BONUS", "nav:bonus").row().text("◀ BACK", `store:product:${product.id}`);
+  await editOrReplyRich(
     ctx,
+    richPurchaseConfirmationMessage({
+      emoji: product.emoji,
+      name: product.name,
+      category: product.category.name,
+      price: product.price,
+      stock: product._count.inventory,
+      credits: user.credits,
+      quantity: safeQty,
+      isUnlimited: product.isUnlimited,
+    }),
     text,
-    confirmPurchaseKeyboard(product.id, nonce, product.price, safeQty, maxAvailable),
+    keyboard,
     deps.logger,
   );
 }
@@ -146,6 +171,7 @@ async function handleUserCallback(ctx: BotContext, deps: BotDependencies, data: 
   if (data === "nav:home") await showHome(ctx, deps);
   else if (data === "nav:store") await showStore(ctx, deps);
   else if (data === "nav:profile") await showProfile(ctx, deps);
+  else if (data === "nav:wallet") await showWallet(ctx, deps);
   else if (data === "nav:bonus") await showBonusStatus(ctx, deps);
   else if (data === "nav:orders") await showOrders(ctx, deps);
   else if (data === "nav:help") await showHelp(ctx, deps);
@@ -154,6 +180,9 @@ async function handleUserCallback(ctx: BotContext, deps: BotDependencies, data: 
   else if (data.startsWith("orders:page:")) {
     const page = Number(data.split(":")[2] ?? 0);
     await showOrders(ctx, deps, page);
+  } else if (data.startsWith("wallet:page:")) {
+    const page = Number(data.split(":")[2] ?? 0);
+    await showWallet(ctx, deps, page);
   } else if (data.startsWith("order:view:")) {
     const purchaseId = data.split(":")[2];
     if (!purchaseId) throw new Error("Order link is invalid.");
@@ -258,7 +287,13 @@ async function handleUserCallback(ctx: BotContext, deps: BotDependencies, data: 
       .row()
       .text("🛍 BACK TO STORE", "nav:store")
       .text("📦 MY ORDERS", "nav:orders");
-    await editOrReply(ctx, purchaseDeliveryMessage(result), keyboard, deps.logger);
+    await editOrReplyRich(
+      ctx,
+      richPurchaseDeliveryMessage(result),
+      purchaseDeliveryMessage(result),
+      keyboard,
+      deps.logger,
+    );
     deps.logger.info({ telegramId: ctx.from!.id, productId, purchaseId: result.purchaseId, repeated: result.repeated }, "Digital product delivered");
   } else {
     return false;
@@ -479,17 +514,8 @@ async function handleAdminCallback(
       },
     ).catch((err: unknown) => deps.logger.warn({ err }, "Could not notify buyer of warranty replacement"));
     await showWarrantyClaimDetail(ctx, deps, parts[3]);
-  } else if (data.startsWith("admin:warranty:refund:") && parts[3]) {
-    const resolved = await resolveWarrantyClaimRefund(deps.database.prisma, parts[3]);
-    await ctx.api.sendMessage(
-      Number(resolved.buyerTelegramId),
-      `💳 <b>${smallCaps("Warranty refund issued")}</b>\n\n` +
-        `Your claim for ${escapeHtml(resolved.product.emoji)} <b>${escapeHtml(resolved.product.name)}</b> (<code>#${escapeHtml(resolved.purchaseId.slice(0, 8))}</code>) was resolved with a full credit refund.\n\n` +
-        `✦ +${creditLabel(resolved.refundedCredits)}\n` +
-        `💰 ${smallCaps("New balance")}: ${creditLabel(resolved.newBalance)}`,
-      { parse_mode: "HTML", reply_markup: mainKeyboard() },
-    ).catch((err: unknown) => deps.logger.warn({ err }, "Could not notify buyer of warranty refund"));
-    await showWarrantyClaimDetail(ctx, deps, parts[3]);
+  } else if (data.startsWith("admin:warranty:refund:")) {
+    throw new ValidationError("Refunds are not offered. Review the claim for a stock replacement or reject it.");
   } else if (data.startsWith("admin:warranty:reject:") && parts[3]) {
     const resolved = await resolveWarrantyClaimReject(deps.database.prisma, parts[3]);
     await ctx.api.sendMessage(

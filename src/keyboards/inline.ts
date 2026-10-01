@@ -7,19 +7,23 @@ export function mainKeyboard(): InlineKeyboard {
     .text("🛍 STORE", "nav:store")
     .text("👤 PROFILE", "nav:profile")
     .row()
+    .text("💳 WALLET", "nav:wallet")
     .text("🎁 BONUS", "nav:bonus")
-    .text("📦 MY ORDERS", "nav:orders")
     .row()
+    .text("📦 MY ORDERS", "nav:orders")
     .text("ℹ️ HELP", "nav:help")
+    .row()
     .url("👑 OWNER", "https://t.me/YoriNetwork");
 }
 
 export function profileKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("🛍 STORE", "nav:store")
-    .text("🎁 BONUS", "nav:bonus")
+    .text("💳 WALLET", "nav:wallet")
     .row()
+    .text("🎁 BONUS", "nav:bonus")
     .text("📦 ORDERS", "nav:orders")
+    .row()
     .text("◀ BACK", "nav:home");
 }
 

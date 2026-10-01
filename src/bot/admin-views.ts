@@ -268,10 +268,9 @@ export async function showWarrantyClaimDetail(
   const keyboard = new InlineKeyboard();
   if (claim.status === "PENDING") {
     keyboard
-      .text("🔄 AUTO-REPLACE FROM STOCK", `admin:warranty:replace:${claim.id}`)
+      .text("🔄 REPLACE FROM STOCK", `admin:warranty:replace:${claim.id}`)
       .row()
-      .text("💳 REFUND CREDITS", `admin:warranty:refund:${claim.id}`)
-      .text("❌ REJECT", `admin:warranty:reject:${claim.id}`)
+      .text("❌ REJECT ISSUE", `admin:warranty:reject:${claim.id}`)
       .row();
   }
   keyboard.text("◀ WARRANTY CLAIMS", "admin:warranty:0");
@@ -284,7 +283,8 @@ export async function showWarrantyClaimDetail(
     `<b>Submitted:</b> ${escapeHtml(formatDate(claim.createdAt))}\n` +
     `<b>Reported issue:</b> ${escapeHtml(claim.reason)}\n` +
     (claim.resolutionNote ? `<b>Resolution:</b> ${escapeHtml(claim.resolutionNote)}\n` : "") +
-    `\n<b>Current delivered item:</b>\n${renderParsedPayloadBlock(claim.purchase.inventoryItem.payload)}`;
+    `\n<b>Current delivered item:</b>\n${renderParsedPayloadBlock(claim.purchase.inventoryItem.payload)}\n\n` +
+    `<i>Refunds are not offered. Pending claims can only be replaced from available stock or rejected.</i>`;
 
   await editOrReply(ctx, text, keyboard, deps.logger);
 }

@@ -9,6 +9,7 @@ import {
   showHelp,
   showOrders,
   showProfile,
+  showWallet,
   showStore,
   showStoreSearchResults,
 } from "../bot/views.js";
@@ -55,6 +56,12 @@ export function registerUserCommands(bot: Bot<BotContext>, deps: BotDependencies
     if (!(await requirePrivate(ctx))) return;
     ctx.session.userFlow = null;
     await showProfile(ctx, deps);
+  });
+
+  bot.command("wallet", async (ctx) => {
+    if (!(await requirePrivate(ctx))) return;
+    ctx.session.userFlow = null;
+    await showWallet(ctx, deps);
   });
 
   bot.command("bonus", async (ctx) => {

@@ -68,10 +68,8 @@ export async function handleUserWarrantySubmission(
   ctx.session.userFlow = null;
 
   const ownerKeyboard = new InlineKeyboard()
-    .text("🔄 AUTO-REPLACE FROM STOCK", `admin:warranty:replace:${claim.id}`)
-    .row()
-    .text("💳 REFUND CREDITS", `admin:warranty:refund:${claim.id}`)
-    .text("❌ REJECT", `admin:warranty:reject:${claim.id}`)
+    .text("🔄 REPLACE FROM STOCK", `admin:warranty:replace:${claim.id}`)
+    .text("❌ REJECT ISSUE", `admin:warranty:reject:${claim.id}`)
     .row()
     .text("🛡 VIEW CLAIM", `admin:warranty:view:${claim.id}`);
 

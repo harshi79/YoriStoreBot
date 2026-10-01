@@ -7,6 +7,7 @@ import {
   listUserPurchases,
 } from "../services/purchases.service.js";
 import { getBonusSettings } from "../services/settings.service.js";
+import { listUserCreditTransactions } from "../services/credits.service.js";
 import {
   getProduct,
   isSubscribedToStock,
@@ -21,6 +22,9 @@ import {
   productMessage,
   profileMessage,
   renderParsedPayloadBlock,
+  richOrderDetailMessage,
+  richOrderHistoryMessage,
+  richProductMessage,
   welcomeMessage,
 } from "../messages/iris.js";
 import {
@@ -29,7 +33,7 @@ import {
   profileKeyboard,
   storeCategoryProductsKeyboard,
 } from "../keyboards/inline.js";
-import { editOrReply, isUnchangedEdit } from "./render.js";
+import { editOrReply, editOrReplyRich, isUnchangedEdit } from "./render.js";
 import type { BotContext } from "../types/context.js";
 import type { BotDependencies } from "./dependencies.js";
 import {
@@ -39,6 +43,7 @@ import {
   formatDate,
   formatDuration,
   smallCaps,
+  truncate,
 } from "../utils/format.js";
 import { buildOrderReceiptText } from "../utils/credential-parser.js";
 import { BonusUnavailableError, DomainError } from "../utils/errors.js";
@@ -188,23 +193,20 @@ export async function showProduct(ctx: BotContext, deps: BotDependencies, produc
     keyboard.text("🖼 VIEW BANNER", `store:banner:${product.id}`).row();
   }
   keyboard.text("◀ BACK", `store:category:${product.categoryId}:0`).text("🏠 HOME", "nav:home");
-  await editOrReply(
-    ctx,
-    productMessage({
-      emoji: product.emoji,
-      name: product.name,
-      category: product.category.name,
-      description: product.description,
-      planDetails: product.planDetails,
-      warrantyHours: product.warrantyHours,
-      featured: product.featured,
-      price: product.price,
-      stock: product._count.inventory,
-      credits: currentUser.credits,
-    }),
-    keyboard,
-    deps.logger,
-  );
+  const card = {
+    emoji: product.emoji,
+    name: product.name,
+    category: product.category.name,
+    description: product.description,
+    planDetails: product.planDetails,
+    warrantyHours: product.warrantyHours,
+    featured: product.featured,
+    isUnlimited: product.isUnlimited,
+    price: product.price,
+    stock: product._count.inventory,
+    credits: currentUser.credits,
+  };
+  await editOrReplyRich(ctx, richProductMessage(card), productMessage(card), keyboard, deps.logger);
 }
 
 export async function showProfile(ctx: BotContext, deps: BotDependencies): Promise<void> {
@@ -284,6 +286,71 @@ export async function showProfile(ctx: BotContext, deps: BotDependencies): Promi
     deps.logger.warn({ err: error }, "Could not send profile avatar; falling back to a text profile");
     await editOrReply(ctx, caption, profileKeyboard(), deps.logger);
   }
+}
+
+const CREDIT_TYPE_ICONS: Record<string, string> = {
+  BONUS: "🎁",
+  GIFT: "🎉",
+  GIFT_ALL: "🎊",
+  REDEEM: "🎟️",
+  PURCHASE: "🛍️",
+  REFUND: "↩️",
+  ADMIN_ADJUSTMENT: "⚙️",
+};
+
+export async function showWallet(ctx: BotContext, deps: BotDependencies, requestedPage = 0): Promise<void> {
+  const user = await findUserByTelegramId(deps.database.prisma, ctx.from!.id);
+  const history = await listUserCreditTransactions(deps.database.prisma, user.id, requestedPage, PAGE_SIZE);
+  const balance = `💰 <b>${smallCaps("Available balance")}:</b> ${creditLabel(user.credits)}`;
+  const keyboard = new InlineKeyboard();
+
+  if (history.total === 0) {
+    keyboard
+      .text("🎁 CLAIM BONUS", "nav:bonus")
+      .text("🛍 STORE", "nav:store")
+      .row()
+      .text("🏠 HOME", "nav:home");
+    await editOrReply(
+      ctx,
+      `💳 <b>${smallCaps("Wallet activity")}</b>\n\n${balance}\n\n${smallCaps("No credit activity yet. Claim a bonus or explore the store to get started.")}`,
+      keyboard,
+      deps.logger,
+    );
+    return;
+  }
+
+  const entries = history.transactions.map((transaction) => {
+    const amount = transaction.amount > 0
+      ? `+${creditLabel(transaction.amount)}`
+      : transaction.amount < 0
+        ? `−${creditLabel(Math.abs(transaction.amount))}`
+        : creditLabel(0);
+    const icon = CREDIT_TYPE_ICONS[transaction.type] ?? "✦";
+    const description = escapeHtml(truncate(transaction.description, 80));
+    return `${icon} <b>${description}</b>\n` +
+      `${amount} · ${smallCaps("Balance")}: ${creditLabel(transaction.balanceAfter)}\n` +
+      `<i>${escapeHtml(formatDate(transaction.createdAt))}</i>`;
+  });
+
+  if (history.pages > 1) {
+    if (history.page > 0) keyboard.text("◀", `wallet:page:${history.page - 1}`);
+    keyboard.text(`${history.page + 1}/${history.pages}`, "noop");
+    if (history.page + 1 < history.pages) keyboard.text("▶", `wallet:page:${history.page + 1}`);
+    keyboard.row();
+  }
+  keyboard
+    .text("🎁 BONUS", "nav:bonus")
+    .text("🛍 STORE", "nav:store")
+    .row()
+    .text("📦 ORDERS", "nav:orders")
+    .text("🏠 HOME", "nav:home");
+
+  await editOrReply(
+    ctx,
+    `💳 <b>${smallCaps("Wallet activity")}</b>\n\n${balance}\n\n${smallCaps("Recent credit activity · newest first")}\n\n${entries.join("\n\n")}`,
+    keyboard,
+    deps.logger,
+  );
 }
 
 export async function showBonusStatus(ctx: BotContext, deps: BotDependencies): Promise<void> {
@@ -367,9 +434,10 @@ export async function showOrders(ctx: BotContext, deps: BotDependencies, page = 
   const lines = purchases.map((purchase) =>
     `• ${escapeHtml(purchase.product.emoji)} <b>${escapeHtml(purchase.product.name)}</b> — ${creditLabel(purchase.amountPaid)}\n  <code>#${escapeHtml(purchase.id.slice(0, 8))}</code> · ${escapeHtml(formatDate(purchase.createdAt))}`,
   );
-  await editOrReply(
+  await editOrReplyRich(
     ctx,
-    `📦 <b>${smallCaps("Your Order Vault")}</b> · ${total}\n\n${smallCaps("Tap any order below to view credentials, account details, download a .txt receipt, or claim warranty.")}\n\n${lines.join("\n\n")}`,
+    richOrderHistoryMessage(purchases, total),
+    `📦 <b>${smallCaps("Your Order Vault")}</b> · ${total}\n\n${smallCaps("Tap any order below to view its email, password, delivery details, or download a .txt receipt. Eligible delivery issues may be reviewed for replacement; refunds are not offered.")}\n\n${lines.join("\n\n")}`,
     keyboard,
     deps.logger,
   );
@@ -387,20 +455,25 @@ export async function showOrderDetail(
   const warrantyRemainingMs = warrantyExpiresAt - Date.now();
   const warrantyActive = purchase.product.warrantyHours > 0 && warrantyRemainingMs > 0;
 
-  let warrantyStatusLine = `🛡 <b>${smallCaps("Warranty")}:</b> None`;
+  let warrantyStatusText = "None";
+  let warrantyStatusLine = `🛡 <b>${smallCaps("Replacement coverage")}:</b> None`;
   if (purchase.warrantyClaim) {
     const statusMap: Record<string, string> = {
-      PENDING: "⏳ Claim pending owner review",
+      PENDING: "⏳ Issue pending owner review",
       REPLACED: "✅ Replaced with fresh stock",
-      REFUNDED: "💳 Credits refunded",
-      REJECTED: "❌ Claim declined",
+      REFUNDED: "Historical credit refund",
+      REJECTED: "❌ Issue declined",
     };
-    warrantyStatusLine = `🛡 <b>${smallCaps("Warranty")}:</b> ${statusMap[purchase.warrantyClaim.status] ?? purchase.warrantyClaim.status}` +
-      (purchase.warrantyClaim.resolutionNote ? ` (${escapeHtml(purchase.warrantyClaim.resolutionNote)})` : "");
+    warrantyStatusText = statusMap[purchase.warrantyClaim.status] ?? purchase.warrantyClaim.status;
+    if (purchase.warrantyClaim.resolutionNote) {
+      warrantyStatusText += ` (${purchase.warrantyClaim.resolutionNote})`;
+    }
+    warrantyStatusLine = `🛡 <b>${smallCaps("Replacement coverage")}:</b> ${escapeHtml(warrantyStatusText)}`;
   } else if (purchase.product.warrantyHours > 0) {
-    warrantyStatusLine = warrantyActive
-      ? `🛡 <b>${smallCaps("Warranty")}:</b> Active (${formatDuration(warrantyRemainingMs)} remaining)`
-      : `🛡 <b>${smallCaps("Warranty")}:</b> Expired`;
+    warrantyStatusText = warrantyActive
+      ? `Active (${formatDuration(warrantyRemainingMs)} remaining)`
+      : "Expired";
+    warrantyStatusLine = `🛡 <b>${smallCaps("Replacement coverage")}:</b> ${escapeHtml(warrantyStatusText)}`;
   }
 
   const sections: string[] = [
@@ -426,6 +499,7 @@ export async function showOrderDetail(
       `📜 <b>${smallCaps("Login guide & rules")}</b>\n${escapeHtml(purchase.product.deliveryInstructions.trim())}`,
     );
   }
+  sections.push(`<i>${smallCaps("Keep credentials private. All sales are final; refunds are not offered.")}</i>`);
 
   const keyboard = new InlineKeyboard()
     .text("📄 DOWNLOAD .TXT", `order:txt:${purchase.id}`);
@@ -434,7 +508,24 @@ export async function showOrderDetail(
   }
   keyboard.row().text("◀ MY ORDERS", "nav:orders").text("🏠 HOME", "nav:home");
 
-  await editOrReply(ctx, sections.join("\n\n"), keyboard, deps.logger);
+  await editOrReplyRich(
+    ctx,
+    richOrderDetailMessage({
+      purchaseId: purchase.id,
+      productName: purchase.product.name,
+      productEmoji: purchase.product.emoji,
+      categoryName: purchase.product.category.name,
+      amountPaid: purchase.amountPaid,
+      createdAt: purchase.createdAt,
+      warrantyStatus: warrantyStatusText,
+      payload: purchase.inventoryItem.payload,
+      planDetails: purchase.product.planDetails,
+      deliveryInstructions: purchase.product.deliveryInstructions,
+    }),
+    sections.join("\n\n"),
+    keyboard,
+    deps.logger,
+  );
 }
 
 export async function sendOrderReceiptFile(
@@ -480,9 +571,9 @@ export async function showWarrantyPrompt(
     .row()
     .text("◀ BACK TO ORDER", `order:view:${purchase.id}`);
 
-  const text = `🛠 <b>${smallCaps("Report an issue / Claim warranty")}</b>\n\n` +
+  const text = `🛠 <b>${smallCaps("Report a delivery issue")}</b>\n\n` +
     `📦 <b>${escapeHtml(purchase.product.emoji)} ${escapeHtml(purchase.product.name)}</b> (<code>#${escapeHtml(purchase.id.slice(0, 8))}</code>)\n\n` +
-    `${smallCaps("Select a quick reason below, or type a message describing what went wrong with the delivered item.")}`;
+    `${smallCaps("Select a reason below, or describe what went wrong. Approved issues may receive a stock replacement only; refunds are not offered.")}`;
   await editOrReply(ctx, text, keyboard, deps.logger);
 }
 

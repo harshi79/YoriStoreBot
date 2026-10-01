@@ -23,10 +23,13 @@ import {
   profileMessage,
   renderParsedPayloadBlock,
   richOrderDetailMessage,
+  richHelpMessage,
+  richHomeMessage,
   richOrderHistoryMessage,
   richProductMessage,
   welcomeMessage,
 } from "../messages/iris.js";
+import { richCallbackButton } from "../messages/rich-ui.js";
 import {
   categoriesKeyboard,
   mainKeyboard,
@@ -55,12 +58,10 @@ const PAGE_SIZE = 8;
 
 export async function showHome(ctx: BotContext, deps: BotDependencies): Promise<void> {
   const user = ctx.from;
-  await editOrReply(
-    ctx,
-    welcomeMessage(user?.first_name),
-    mainKeyboard(),
-    deps.logger,
-  );
+  await editOrReplyRich(ctx, richHomeMessage(user?.first_name), welcomeMessage(user?.first_name), {
+    fallbackKeyboard: mainKeyboard(),
+    logger: deps.logger,
+  });
 }
 
 export async function sendWelcomeVideo(ctx: BotContext, deps: BotDependencies): Promise<void> {
@@ -179,20 +180,34 @@ export async function showProduct(ctx: BotContext, deps: BotDependencies, produc
   const canBuy = product.enabled && product.deletedAt === null && product.category.enabled &&
     product.category.deletedAt === null && product._count.inventory > 0;
   const keyboard = new InlineKeyboard();
+  const actions: Array<ReturnType<typeof richCallbackButton>> = [];
   if (canBuy) {
-    keyboard.text("🛒 BUY", `buy:start:${product.id}`).row();
+    const callbackData = `buy:start:${product.id}`;
+    keyboard.text("🛒 Buy now", callbackData).row();
+    actions.push(richCallbackButton("🛒 Buy now", callbackData, "success"));
   } else {
     const subscribed = await isSubscribedToStock(deps.database.prisma, currentUser.id, product.id);
-    keyboard.text("⚠️ OUT OF STOCK", "noop").row();
+    const callbackData = `store:notify:${product.id}`;
+    keyboard.text("⚠️ Out of stock", "noop").row();
     keyboard.text(
-      subscribed ? "🔕 UNSUBSCRIBE RESTOCK ALERT" : "🔔 NOTIFY WHEN RESTOCKED",
-      `store:notify:${product.id}`,
+      subscribed ? "🔕 Turn off restock alert" : "🔔 Notify me when available",
+      callbackData,
     ).row();
+    actions.push(richCallbackButton(
+      subscribed ? "🔕 Restock alert on" : "🔔 Notify me",
+      callbackData,
+      "primary",
+    ));
   }
   if (product.mediaFileId) {
-    keyboard.text("🖼 VIEW BANNER", `store:banner:${product.id}`).row();
+    const callbackData = `store:banner:${product.id}`;
+    keyboard.text("🖼 View image", callbackData).row();
+    actions.push(richCallbackButton("🖼 View image", callbackData));
   }
-  keyboard.text("◀ BACK", `store:category:${product.categoryId}:0`).text("🏠 HOME", "nav:home");
+  const backData = `store:category:${product.categoryId}:0`;
+  keyboard.text("◀ Category", backData).text("🏠 Home", "nav:home");
+  actions.push(richCallbackButton("◀ Back to category", backData, "link"));
+
   const card = {
     emoji: product.emoji,
     name: product.name,
@@ -206,7 +221,10 @@ export async function showProduct(ctx: BotContext, deps: BotDependencies, produc
     stock: product._count.inventory,
     credits: currentUser.credits,
   };
-  await editOrReplyRich(ctx, richProductMessage(card), productMessage(card), keyboard, deps.logger);
+  await editOrReplyRich(ctx, richProductMessage(card, actions), productMessage(card), {
+    fallbackKeyboard: keyboard,
+    logger: deps.logger,
+  });
 }
 
 export async function showProfile(ctx: BotContext, deps: BotDependencies): Promise<void> {
@@ -436,10 +454,9 @@ export async function showOrders(ctx: BotContext, deps: BotDependencies, page = 
   );
   await editOrReplyRich(
     ctx,
-    richOrderHistoryMessage(purchases, total),
+    richOrderHistoryMessage(purchases, total, page, pages),
     `📦 <b>${smallCaps("Your Order Vault")}</b> · ${total}\n\n${smallCaps("Tap any order below to view its email, password, delivery details, or download a .txt receipt. Eligible delivery issues may be reviewed for replacement; refunds are not offered.")}\n\n${lines.join("\n\n")}`,
-    keyboard,
-    deps.logger,
+    { fallbackKeyboard: keyboard, logger: deps.logger },
   );
 }
 
@@ -501,12 +518,18 @@ export async function showOrderDetail(
   }
   sections.push(`<i>${smallCaps("Keep credentials private. All sales are final; refunds are not offered.")}</i>`);
 
-  const keyboard = new InlineKeyboard()
-    .text("📄 DOWNLOAD .TXT", `order:txt:${purchase.id}`);
+  const receiptData = `order:txt:${purchase.id}`;
+  const keyboard = new InlineKeyboard().text("📄 Download receipt", receiptData);
+  const actions: Array<ReturnType<typeof richCallbackButton>> = [
+    richCallbackButton("📄 Download receipt", receiptData, "primary"),
+  ];
   if (warrantyActive && !purchase.warrantyClaim) {
-    keyboard.text("🛠 REPORT ISSUE", `order:warranty:${purchase.id}`);
+    const claimData = `order:warranty:${purchase.id}`;
+    keyboard.text("🛠 Report issue", claimData);
+    actions.push(richCallbackButton("🛠 Report issue", claimData, "danger"));
   }
-  keyboard.row().text("◀ MY ORDERS", "nav:orders").text("🏠 HOME", "nav:home");
+  keyboard.row().text("◀ My orders", "nav:orders").text("🏠 Home", "nav:home");
+  actions.push(richCallbackButton("◀ My orders", "nav:orders", "link"));
 
   await editOrReplyRich(
     ctx,
@@ -521,10 +544,10 @@ export async function showOrderDetail(
       payload: purchase.inventoryItem.payload,
       planDetails: purchase.product.planDetails,
       deliveryInstructions: purchase.product.deliveryInstructions,
+      actions,
     }),
     sections.join("\n\n"),
-    keyboard,
-    deps.logger,
+    { fallbackKeyboard: keyboard, logger: deps.logger },
   );
 }
 
@@ -547,10 +570,27 @@ export async function sendOrderReceiptFile(
     warrantyHours: purchase.product.warrantyHours,
   });
   const filename = `iris-receipt-${escapeFilenamePart(purchase.product.name)}-${purchase.id.slice(0, 8)}.txt`;
-  await ctx.replyWithDocument(new InputFile(Buffer.from(receiptText, "utf8"), filename), {
-    caption: `📄 <b>${smallCaps("Order receipt")}</b> · <code>#${escapeHtml(purchase.id.slice(0, 8))}</code>`,
-    parse_mode: "HTML",
-  });
+  const receipt = Buffer.from(receiptText, "utf8");
+  const caption = `📄 Order receipt · #${purchase.id.slice(0, 8)}`;
+  try {
+    await ctx.replyWithRichMessage({
+      blocks: [
+        { type: "heading", size: 2, text: "📄 Order receipt" },
+        { type: "paragraph", text: "Your private text copy is ready to save." },
+        {
+          type: "document",
+          document: { type: "document", media: new InputFile(receipt, filename) },
+          caption: { text: caption },
+        },
+      ],
+    });
+  } catch (error) {
+    deps.logger.debug({ err: error }, "Rich receipt block could not be sent; using a regular document");
+    await ctx.replyWithDocument(new InputFile(receipt, filename), {
+      caption: `📄 <b>${smallCaps("Order receipt")}</b> · <code>#${escapeHtml(purchase.id.slice(0, 8))}</code>`,
+      parse_mode: "HTML",
+    });
+  }
 }
 
 export async function showWarrantyPrompt(
@@ -578,7 +618,10 @@ export async function showWarrantyPrompt(
 }
 
 export async function showHelp(ctx: BotContext, deps: BotDependencies): Promise<void> {
-  await editOrReply(ctx, helpMessage(), mainKeyboard(), deps.logger);
+  await editOrReplyRich(ctx, richHelpMessage(), helpMessage(), {
+    fallbackKeyboard: mainKeyboard(),
+    logger: deps.logger,
+  });
 }
 
 export function parsePositiveInteger(raw: string, label: string): number {

@@ -1,5 +1,4 @@
-import { GrammyError, InputFile } from "grammy";
-import type { InlineKeyboard } from "grammy";
+import { GrammyError, InlineKeyboard, InputFile } from "grammy";
 import type { InputMediaPhoto, InputRichMessage } from "grammy/types";
 import type { BotContext } from "../types/context.js";
 import type { AppLogger } from "../utils/logger.js";
@@ -48,13 +47,19 @@ export async function editOrReply(
   });
 }
 
+export interface RichReplyOptions {
+  /** Inline keyboard shown only when the rich message is unavailable. */
+  fallbackKeyboard?: InlineKeyboard;
+  logger?: AppLogger;
+}
+
 export async function editOrReplyRich(
   ctx: BotContext,
   richMessage: InputRichMessage,
   fallbackText: string,
-  keyboard?: InlineKeyboard,
-  logger?: AppLogger,
+  options: RichReplyOptions = {},
 ): Promise<void> {
+  const { fallbackKeyboard, logger } = options;
   const source = ctx.callbackQuery?.message;
   if (source && "message_id" in source && source.date !== 0) {
     const isMedia = "photo" in source || "video" in source || "animation" in source || "document" in source;
@@ -67,23 +72,24 @@ export async function editOrReplyRich(
     } else {
       try {
         await ctx.api.editMessageText(source.chat.id, source.message_id, richMessage, {
-          ...(keyboard ? { reply_markup: keyboard } : {}),
+          // Editing with an empty keyboard removes stale buttons from the previous screen.
+          reply_markup: new InlineKeyboard(),
         });
         return;
       } catch (error) {
         if (isUnchangedEdit(error)) return;
         logger?.debug({ err: error }, "Rich message edit failed; falling back to HTML");
-        await editOrReply(ctx, fallbackText, keyboard, logger);
+        await editOrReply(ctx, fallbackText, fallbackKeyboard, logger);
         return;
       }
     }
   }
 
   try {
-    await ctx.replyWithRichMessage(richMessage, keyboard ? { reply_markup: keyboard } : {});
+    await ctx.replyWithRichMessage(richMessage);
   } catch (error) {
     logger?.debug({ err: error }, "Rich message send failed; falling back to HTML");
-    await editOrReply(ctx, fallbackText, keyboard, logger);
+    await editOrReply(ctx, fallbackText, fallbackKeyboard, logger);
   }
 }
 

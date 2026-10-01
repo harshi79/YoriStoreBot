@@ -28,7 +28,7 @@ Iris is a Node.js 22 / TypeScript Telegram bot for an owner-managed digital-good
    npm start
    ```
 
-   `npm run dev` runs the TypeScript entry point in watch mode. Iris verifies its database connection and Telegram credentials at startup, configures command menus, and gracefully closes polling and PostgreSQL on shutdown signals.
+   `npm run dev` runs the TypeScript entry point in watch mode. Iris verifies its database connection and Telegram credentials at startup, configures command menus, and gracefully closes polling and PostgreSQL on shutdown signals. The Telegram menu shows public commands plus `/admin`; other owner commands are intentionally not advertised, and `/admin` remains owner-authorized server-side.
 
 The sole authorized owner is fixed at Telegram ID `7728424218`; all owner commands, owner callbacks, and active owner form submissions are checked against that ID server-side, in addition to being restricted to private chats.
 
@@ -50,8 +50,8 @@ The bonus settings can also be changed from the owner panel; those overrides are
 ## User features
 
 - `/start` sends Iris's welcome video (`https://imglink.cc/cdn/jw1NZXEQQS.mp4`) with a text fallback and inline navigation.
-- `/store`, `/profile`, `/wallet`, `/bonus`, `/redeem CODE`, `/orders`, and `/help` are available in private chats. `/wallet` shows the current balance and a private, paginated credit ledger with each change and the resulting balance.
-- Categories and products come from PostgreSQL; products show current stock and credit prices. Product details and purchase confirmations use Telegram Rich Messages for compact item, stock, price, and balance tables, with an HTML fallback.
+- `/start`, `/store`, `/search QUERY`, `/profile`, `/wallet`, `/bonus`, `/redeem CODE`, `/orders`, `/help`, and `/cancel` are available in private chats; `/admin` appears in the menu but is owner-only. `/wallet` shows the current balance and a private, paginated credit ledger with each change and the resulting balance.
+- Categories and products come from PostgreSQL; products show current stock and credit prices. Interactive screens use Telegram Bot API 10.3 rich messages: compact item/order tables, styled in-message buttons, and expandable delivery notes. If a rich message cannot be sent or edited, Iris falls back to HTML and inline keyboards.
 - `/orders` keeps a private, paginated purchase history. Opening an order shows parsed email/login, password, plan fields, and delivery rules; users can also download a `.txt` receipt. Order history and delivery screens use Rich Message tables with an HTML fallback.
 - Daily bonuses and code redemptions use conditional database updates and write matching credit-ledger rows in the same transaction.
 - Purchases lock available stock, charge the buyer, mark inventory sold, write the purchase and ledger record atomically, and use an idempotency key to make callback retries safe. Delivery is returned only to the purchasing Telegram account.
@@ -59,7 +59,7 @@ The bonus settings can also be changed from the owner panel; those overrides are
 
 ## Owner features
 
-Open `/admin` for inline management of categories, products, inventory, users, redeem codes, purchases, credit settings, statistics, exports, broadcast, restart, and reset. Available owner commands are `/gift USER_ID CREDITS`, `/rm USER_ID CREDITS`, `/giftall CREDITS`, `/code AMOUNT CREDITS MAXREDEEMS`, `/broadcast`, `/stats`, `/export`, `/addstock`, `/restart`, and `/reset`. Delivery-issue claims may be replaced from available stock or rejected; the owner panel has no refund action.
+Open `/admin` for a sectioned owner console with management for categories, products, inventory, users, redeem codes, purchases, credit settings, statistics, exports, broadcast, restart, and reset. Additional owner-only commands are `/gift USER_ID CREDITS`, `/rm USER_ID CREDITS`, `/giftall CREDITS`, `/code AMOUNT CREDITS MAXREDEEMS`, `/broadcast`, `/stats`, `/export`, `/addstock`, `/restart`, and `/reset`; they remain usable when typed but are not listed in the Telegram command menu. Delivery-issue claims may be replaced from available stock or rejected; the owner panel has no refund action.
 
 - Inventory can be entered as lines or imported from a `.txt`/`.csv` file (up to 1 MB, 500 items per batch, 3,500 characters per item). Duplicate stock values are skipped using a SHA-256 hash; stock payloads are not shown in admin list views.
 - `/giftall` credits users active in the preceding 72 hours. Over-limit balances are skipped and reported.

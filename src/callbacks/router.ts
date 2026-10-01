@@ -81,6 +81,7 @@ import {
   richPurchaseConfirmationMessage,
   richPurchaseDeliveryMessage,
 } from "../messages/iris.js";
+import { richCallbackButton } from "../messages/rich-ui.js";
 
 function adminKeyboardFor(data: string) {
   return data.startsWith("admin:") || data.startsWith("reset:") ? adminPanelKeyboard() : mainKeyboard();
@@ -146,9 +147,31 @@ async function showPurchaseConfirmation(
     quantity: safeQty,
     expiresAt: Date.now() + 2 * 60 * 1_000,
   };
+  const backData = `store:product:${product.id}`;
   const keyboard = canAfford
     ? confirmPurchaseKeyboard(product.id, nonce, product.price, safeQty, maxAvailable)
-    : new InlineKeyboard().text("🎁 CLAIM BONUS", "nav:bonus").row().text("◀ BACK", `store:product:${product.id}`);
+    : new InlineKeyboard().text("🎁 Claim bonus", "nav:bonus").row().text("◀ Back to item", backData);
+  const richActionRows: Array<Array<ReturnType<typeof richCallbackButton>>> = [];
+  if (canAfford) {
+    if (maxAvailable >= 2) {
+      richActionRows.push([1, 2, 3, 5]
+        .filter((qty) => qty <= maxAvailable)
+        .map((qty) => richCallbackButton(
+          qty === safeQty ? `✓ ${qty}×` : `${qty}×`,
+          `buy:qty:${product.id}:${qty}`,
+          qty === safeQty ? "primary" : undefined,
+        )));
+    }
+    richActionRows.push([
+      richCallbackButton("🛒 Confirm purchase", `buy:confirm:${product.id}:${nonce}:${product.price.toString(36)}`, "success"),
+      richCallbackButton("◀ Back to item", backData, "link"),
+    ]);
+  } else {
+    richActionRows.push([
+      richCallbackButton("🎁 Claim daily bonus", "nav:bonus", "primary"),
+      richCallbackButton("◀ Back to item", backData, "link"),
+    ]);
+  }
   await editOrReplyRich(
     ctx,
     richPurchaseConfirmationMessage({
@@ -160,10 +183,9 @@ async function showPurchaseConfirmation(
       credits: user.credits,
       quantity: safeQty,
       isUnlimited: product.isUnlimited,
-    }),
+    }, richActionRows),
     text,
-    keyboard,
-    deps.logger,
+    { fallbackKeyboard: keyboard, logger: deps.logger },
   );
 }
 
@@ -281,18 +303,29 @@ async function handleUserCallback(ctx: BotContext, deps: BotDependencies, data: 
       if (error instanceof PriceChangedError) ctx.session.purchaseConfirmation = null;
       throw error;
     }
+    const receiptData = `order:txt:${result.purchaseId}`;
+    const issueData = `order:warranty:${result.purchaseId}`;
     const keyboard = new InlineKeyboard()
-      .text("📄 DOWNLOAD .TXT", `order:txt:${result.purchaseId}`)
-      .text("🛠 REPORT ISSUE", `order:warranty:${result.purchaseId}`)
+      .text("📄 Download receipt", receiptData)
+      .text("🛠 Report issue", issueData)
       .row()
-      .text("🛍 BACK TO STORE", "nav:store")
-      .text("📦 MY ORDERS", "nav:orders");
+      .text("🛍 Back to store", "nav:store")
+      .text("📦 My orders", "nav:orders");
+    const richActionRows = [
+      [
+        richCallbackButton("📄 Download receipt", receiptData, "primary"),
+        richCallbackButton("🛠 Report issue", issueData, "danger"),
+      ],
+      [
+        richCallbackButton("🛍 Back to store", "nav:store", "link"),
+        richCallbackButton("📦 My orders", "nav:orders"),
+      ],
+    ];
     await editOrReplyRich(
       ctx,
-      richPurchaseDeliveryMessage(result),
+      richPurchaseDeliveryMessage(result, richActionRows),
       purchaseDeliveryMessage(result),
-      keyboard,
-      deps.logger,
+      { fallbackKeyboard: keyboard, logger: deps.logger },
     );
     deps.logger.info({ telegramId: ctx.from!.id, productId, purchaseId: result.purchaseId, repeated: result.repeated }, "Digital product delivered");
   } else {

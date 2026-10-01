@@ -1,6 +1,9 @@
 import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
+import { PrismaPg } from "@prisma/adapter-pg";
+import { Pool } from "pg";
 import { PrismaPGlite } from "pglite-prisma-adapter";
 import { GrammyError, InlineKeyboard } from "grammy";
 import type { Api } from "grammy";
@@ -52,9 +55,19 @@ import { purchaseDeliveryMessage, welcomeMessage } from "../src/messages/iris.js
 
 const OWNER_ID = 7_728_424_218n;
 const migrationPath = new URL("../prisma/migrations/20260930000000_init/migration.sql", import.meta.url);
+const wishlistMigrationPath = new URL("../prisma/migrations/20261002010000_mini_app_wishlist/migration.sql", import.meta.url);
+const batchMigrationPath = new URL("../prisma/migrations/20261002000000_purchase_batches/migration.sql", import.meta.url);
 
-let pg: PGlite;
+let pg: PGlite | undefined;
+let postgresPool: Pool | undefined;
+let postgresSchema: string;
 let prisma: PrismaClient;
+
+function createTestClient(): PrismaClient {
+  if (postgresPool) return new PrismaClient({ adapter: new PrismaPg(postgresPool, { schema: postgresSchema }) });
+  if (!pg) throw new Error("Test database is not initialized");
+  return new PrismaClient({ adapter: new PrismaPGlite(pg) });
+}
 
 async function makeUser(telegramId: bigint, credits = 0, lastActiveAt = new Date()) {
   return prisma.user.create({ data: { telegramId, credits, lastActiveAt } });
@@ -71,17 +84,29 @@ interface CapturedApiCall {
   payload: Record<string, unknown>;
 }
 
-function makeTestBot() {
+function makeTestBot(miniAppUrl = "") {
   const config = loadConfig({
     BOT_TOKEN: "TEST_TOKEN_NOT_A_REAL_CREDENTIAL",
     DATABASE_URL: "postgresql://localhost:5432/iris_test",
     NODE_ENV: "test",
+    MINI_APP_URL: miniAppUrl,
   });
   const logger = {
     trace: vi.fn(), debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn(),
   } as unknown as AppLogger;
   const bot = createBot({ config, database: { prisma, close: async () => undefined }, logger });
-  bot.botInfo = { id: 1_234_567, is_bot: true, first_name: "Iris test", username: "iris_test_bot" };
+  bot.botInfo = {
+    id: 1_234_567, is_bot: true, first_name: "Iris test", username: "iris_test_bot",
+    can_join_groups: false,
+    can_read_all_group_messages: false,
+    supports_inline_queries: false,
+    can_connect_to_business: false,
+    has_main_web_app: false,
+    has_topics_enabled: false,
+    allows_users_to_create_topics: false,
+    can_manage_bots: false,
+    supports_join_request_queries: false,
+  };
   const calls: CapturedApiCall[] = [];
   let messageId = 1_000;
   bot.api.config.use(async (_previous, method, payload) => {
@@ -136,11 +161,11 @@ describe("runtime configuration", () => {
     expect(() => loadConfig({ ...base, DATABASE_URL: "not-a-url" })).toThrow("valid PostgreSQL URL");
   });
 
-  it("handles blank optional env vars and allows embedded PGlite when DATABASE_URL is omitted", () => {
+  it("handles blank optional env vars with explicit development storage", () => {
     const cfg = loadConfig({
       BOT_TOKEN: "TEST_TOKEN_NOT_A_REAL_CREDENTIAL",
       DATABASE_URL: "",
-      NODE_ENV: "",
+      NODE_ENV: "development",
       LOG_LEVEL: "",
       BONUS_CREDITS: "",
       BONUS_PERIOD_HOURS: "",
@@ -152,22 +177,64 @@ describe("runtime configuration", () => {
     expect(cfg.databasePoolSize).toBe(10);
   });
 
+  it.each([undefined, "", "   ", "postgresql://YOUR_DB_USER:YOUR_DB_PASSWORD@localhost:5432/iris"])(
+    "rejects missing or placeholder production storage (%s)", (databaseUrl) => {
+      expect(() => loadConfig({
+        BOT_TOKEN: "TEST_TOKEN_NOT_A_REAL_CREDENTIAL",
+        NODE_ENV: "production",
+        DATABASE_URL: databaseUrl,
+      })).toThrow("DATABASE_URL is required in production");
+    },
+  );
+
+  it.each([undefined, "", "   "])("defaults a missing/blank environment to production safety (%s)", (environment) => {
+    const base = { BOT_TOKEN: "TEST_TOKEN_NOT_A_REAL_CREDENTIAL", NODE_ENV: environment };
+    expect(() => loadConfig(base)).toThrow("DATABASE_URL is required in production");
+    expect(loadConfig({ ...base, DATABASE_URL: "postgresql://localhost:5432/iris" }).nodeEnv).toBe("production");
+  });
+
+  it("requires a real PostgreSQL URL in production while retaining explicit local/test storage", () => {
+    expect(loadConfig({
+      BOT_TOKEN: "TEST_TOKEN_NOT_A_REAL_CREDENTIAL",
+      NODE_ENV: "production",
+      DATABASE_URL: "postgresql://localhost:5432/iris",
+    })).toMatchObject({ nodeEnv: "production", databaseUrl: "postgresql://localhost:5432/iris" });
+    for (const environment of ["development", "test"]) {
+      expect(loadConfig({ BOT_TOKEN: "TEST_TOKEN_NOT_A_REAL_CREDENTIAL", NODE_ENV: environment }))
+        .toMatchObject({ nodeEnv: environment, databaseUrl: "" });
+    }
+  });
+
   it("initializes an embedded PGlite database and schema automatically when DATABASE_URL is empty", async () => {
     const logger = {
       trace: vi.fn(), debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn(),
     } as unknown as AppLogger;
-    const db = createDatabase("", 5, logger);
+    const db = createDatabase("", 5, logger, "test");
     try {
       await db.init?.();
       const count = await db.prisma.user.count();
       expect(count).toBeGreaterThanOrEqual(0);
+      await expect(db.prisma.purchase.findMany()).resolves.toEqual([]);
     } finally {
       await db.close();
     }
-  });
+  }, 30_000);
 });
 
 describe("Telegram command menu", () => {
+  it("registers the HTTPS Mini App menu button without changing owner authorization", async () => {
+    const { bot, calls, logger } = makeTestBot();
+    await registerCommandMenus(bot.api, OWNER_ID, logger, "https://iris.example.test");
+    expect(calls.find((call) => call.method === "setChatMenuButton")?.payload.menu_button).toEqual({
+      type: "web_app", text: "Open Iris", web_app: { url: "https://iris.example.test" },
+    });
+  });
+  it("opens a private-chat Mini App button from /app", async () => {
+    const { bot, calls } = makeTestBot("https://iris.example.test");
+    await bot.handleUpdate(privateMessageUpdate(61_040, "/app"));
+    const message = calls.find((call) => call.method === "sendMessage" && call.payload.reply_markup);
+    expect(JSON.stringify(message?.payload.reply_markup)).toContain('"web_app":{"url":"https://iris.example.test"}');
+  });
   it("shows public commands plus /admin to everyone and overwrites the owner's legacy menu", async () => {
     const { bot, calls, logger } = makeTestBot();
     await registerCommandMenus(bot.api, OWNER_ID, logger);
@@ -229,18 +296,59 @@ function privateCallbackUpdate(telegramId: number, data: string): Update {
 }
 
 beforeAll(async () => {
-  pg = new PGlite();
-  await pg.exec(await readFile(migrationPath, "utf8"));
-  prisma = new PrismaClient({ adapter: new PrismaPGlite(pg) });
+  const initialSql = await readFile(migrationPath, "utf8");
+  const batchSql = await readFile(batchMigrationPath, "utf8");
+  const wishlistSql = await readFile(wishlistMigrationPath, "utf8");
+  if (process.env.TEST_POSTGRES_URL) {
+    // Never use the application's DATABASE_URL. Keep real PostgreSQL tests in a
+    // unique schema so cleanup cannot delete pre-existing tables or store data.
+    postgresSchema = `iris_test_${randomUUID().replaceAll("-", "")}`;
+    const setupPool = new Pool({ connectionString: process.env.TEST_POSTGRES_URL });
+    try {
+      await setupPool.query(`CREATE SCHEMA "${postgresSchema}"`);
+    } finally {
+      await setupPool.end();
+    }
+    postgresPool = new Pool({
+      connectionString: process.env.TEST_POSTGRES_URL,
+      options: `-c search_path=${postgresSchema}`,
+      max: 10,
+    });
+    const client = await postgresPool.connect();
+    try {
+      await client.query(initialSql);
+      await client.query(batchSql);
+      await client.query(wishlistSql);
+    } finally {
+      client.release();
+    }
+  } else {
+    pg = new PGlite();
+    await pg.exec(initialSql);
+    await pg.exec(batchSql);
+    await pg.exec(wishlistSql);
+  }
+  prisma = createTestClient();
   await prisma.$connect();
 }, 60_000);
 
 afterAll(async () => {
-  await prisma?.$disconnect();
-  await pg?.close();
+  try {
+    await prisma?.$disconnect();
+  } finally {
+    if (postgresPool) {
+      try {
+        await postgresPool.query(`DROP SCHEMA IF EXISTS "${postgresSchema}" CASCADE`);
+      } finally {
+        await postgresPool.end();
+      }
+    }
+    await pg?.close();
+  }
 }, 60_000);
 
 beforeEach(async () => {
+  await prisma.wishlistItem.deleteMany();
   await prisma.warrantyClaim.deleteMany();
   await prisma.stockSubscription.deleteMany();
   await prisma.purchase.deleteMany();
@@ -362,6 +470,124 @@ describe("transaction-safe purchases", () => {
     const otherUser = await makeUser(10_005n, 100);
     await expect(purchaseProduct(prisma, otherUser.id, product.id, "purchase:once")).rejects.toBeInstanceOf(ValidationError);
     await expect(purchaseProduct(prisma, user.id, product.id, "purchase:another")).rejects.toBeInstanceOf(OutOfStockError);
+  });
+
+  it("replays every bulk item and its original price through a fresh database client", async () => {
+    const buyer = await makeUser(10_020n, 500);
+    const { product } = await makeProduct("Bulk replay", 40);
+    await addInventoryItems(prisma, product.id, ["bulk-one", "bulk-two", "bulk-three"]);
+    const first = await purchaseProduct(prisma, buyer.id, product.id, "purchase:bulk-replay", 40, 3);
+    await updateProduct(prisma, product.id, { price: 99, enabled: false });
+
+    const newClient = createTestClient();
+    try {
+      // Neither a new client nor a changed quantity/price may alter a committed checkout.
+      const replay = await purchaseProduct(newClient, buyer.id, product.id, "purchase:bulk-replay", 99, 1);
+      expect(replay).toEqual({ ...first, repeated: true });
+      expect(purchaseDeliveryMessage(replay)).toContain("× 3");
+      for (const payload of first.payloads) expect(purchaseDeliveryMessage(replay)).toContain(payload);
+    } finally {
+      await newClient.$disconnect();
+    }
+    expect(await prisma.purchase.count()).toBe(3);
+    expect(await prisma.creditTransaction.count({ where: { type: "PURCHASE", amount: -120 } })).toBe(1);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: buyer.id } })).credits).toBe(380);
+    expect(await countAvailableInventory(prisma, product.id)).toBe(0);
+  });
+
+  it.each([126, 127, 128])("supports %i-character bulk request keys without truncation collisions", async (length) => {
+    const buyer = await makeUser(10_021n, 500);
+    const { product } = await makeProduct("Long request key", 20);
+    await addInventoryItems(prisma, product.id, ["long-key-one", "long-key-two", "long-key-three"]);
+    const key = "k".repeat(length);
+    const first = await purchaseProduct(prisma, buyer.id, product.id, key, 20, 3);
+    const replay = await purchaseProduct(prisma, buyer.id, product.id, key);
+    expect(replay).toEqual({ ...first, repeated: true });
+    expect(first).toMatchObject({ quantity: 3, paid: 60, remainingCredits: 440 });
+    const rows = await prisma.purchase.findMany({ orderBy: { batchIndex: "asc" } });
+    expect(rows.map((row) => row.batchId)).toEqual([first.purchaseId, first.purchaseId, first.purchaseId]);
+    expect(rows.map((row) => row.batchIndex)).toEqual([0, 1, 2]);
+    expect(new Set(rows.map((row) => row.idempotencyKey)).size).toBe(3);
+    expect(rows.every((row) => row.idempotencyKey.length <= 128)).toBe(true);
+    expect(await prisma.creditTransaction.count({ where: { type: "PURCHASE" } })).toBe(1);
+  });
+
+  it("recovers the complete committed bulk delivery after a transaction error", async () => {
+    const buyer = await makeUser(10_022n, 500);
+    const { product } = await makeProduct("Lost bulk response", 30);
+    await addInventoryItems(prisma, product.id, ["lost-one", "lost-two", "lost-three"]);
+    const first = await purchaseProduct(prisma, buyer.id, product.id, "purchase:lost-response", 30, 3);
+    const transaction = vi.spyOn(prisma, "$transaction").mockRejectedValueOnce(new Error("Simulated lost response"));
+    try {
+      const replay = await purchaseProduct(prisma, buyer.id, product.id, "purchase:lost-response", 30, 3);
+      expect(replay).toEqual({ ...first, repeated: true });
+    } finally {
+      transaction.mockRestore();
+    }
+    expect(await prisma.purchase.count()).toBe(3);
+    expect(await prisma.creditTransaction.count({ where: { type: "PURCHASE" } })).toBe(1);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: buyer.id } })).credits).toBe(410);
+  });
+
+  it("serializes concurrent duplicate bulk requests without extra charges or stock allocation", async () => {
+    const buyer = await makeUser(10_023n, 500);
+    const { product } = await makeProduct("Concurrent bulk retry", 40);
+    await addInventoryItems(prisma, product.id, ["concurrent-one", "concurrent-two", "concurrent-three"]);
+    const results = await Promise.all(Array.from({ length: 3 }, () =>
+      purchaseProduct(prisma, buyer.id, product.id, "purchase:concurrent-bulk", 40, 3)));
+    expect(new Set(results.map((result) => result.purchaseId)).size).toBe(1);
+    expect(results.filter((result) => !result.repeated)).toHaveLength(1);
+    for (const result of results) {
+      expect(result).toMatchObject({ quantity: 3, paid: 120, remainingCredits: 380 });
+      expect(result.payloads).toEqual(results[0]!.payloads);
+    }
+    expect(await prisma.purchase.count()).toBe(3);
+    expect(await prisma.creditTransaction.count({ where: { type: "PURCHASE" } })).toBe(1);
+    expect(await countAvailableInventory(prisma, product.id)).toBe(0);
+  });
+
+  it("rejects bulk request keys reused by another buyer, product, or internal item", async () => {
+    const buyer = await makeUser(10_024n, 500);
+    const otherBuyer = await makeUser(10_025n, 500);
+    const { product } = await makeProduct("Private bulk retry", 25);
+    const { product: otherProduct } = await makeProduct("Different checkout", 10);
+    await addInventoryItems(prisma, product.id, ["private-one", "private-two"]);
+    await purchaseProduct(prisma, buyer.id, product.id, "purchase:private-bulk", 25, 2);
+    const child = await prisma.purchase.findFirstOrThrow({ where: { batchIndex: 1 } });
+    await expect(purchaseProduct(prisma, otherBuyer.id, product.id, "purchase:private-bulk"))
+      .rejects.toBeInstanceOf(ValidationError);
+    await expect(purchaseProduct(prisma, buyer.id, otherProduct.id, "purchase:private-bulk"))
+      .rejects.toBeInstanceOf(ValidationError);
+    await expect(purchaseProduct(prisma, buyer.id, product.id, child.idempotencyKey))
+      .rejects.toBeInstanceOf(ValidationError);
+    expect(await prisma.purchase.count()).toBe(2);
+    expect(await prisma.creditTransaction.count({ where: { type: "PURCHASE" } })).toBe(1);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: otherBuyer.id } })).credits).toBe(500);
+  });
+
+  it("replays free bulk purchases without inferring quantity from their price", async () => {
+    const buyer = await makeUser(10_026n);
+    const { product } = await makeProduct("Free bulk delivery", 0);
+    await addInventoryItems(prisma, product.id, ["free-one", "free-two", "free-three"]);
+    const first = await purchaseProduct(prisma, buyer.id, product.id, "purchase:free-bulk", 0, 3);
+    expect(await purchaseProduct(prisma, buyer.id, product.id, "purchase:free-bulk"))
+      .toEqual({ ...first, repeated: true });
+    expect(first).toMatchObject({ quantity: 3, paid: 0, remainingCredits: 0 });
+    expect(await prisma.creditTransaction.count({ where: { type: "PURCHASE", amount: 0 } })).toBe(1);
+  });
+
+  it("does not partially fulfill a bulk checkout with insufficient stock or credits", async () => {
+    const buyer = await makeUser(10_027n, 20);
+    const { product } = await makeProduct("Atomic bulk checkout", 25);
+    await addInventoryItems(prisma, product.id, ["atomic-one", "atomic-two"]);
+    await expect(purchaseProduct(prisma, buyer.id, product.id, "purchase:too-many", 25, 3))
+      .rejects.toBeInstanceOf(OutOfStockError);
+    await expect(purchaseProduct(prisma, buyer.id, product.id, "purchase:too-expensive", 25, 2))
+      .rejects.toBeInstanceOf(InsufficientCreditsError);
+    expect(await prisma.purchase.count()).toBe(0);
+    expect(await prisma.creditTransaction.count()).toBe(0);
+    expect(await countAvailableInventory(prisma, product.id)).toBe(2);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: buyer.id } })).credits).toBe(20);
   });
 
   it("rejects a stale price confirmation without charging or reserving stock", async () => {
@@ -495,7 +721,7 @@ describe("credits, bonuses, and redeem codes", () => {
     const failed = attempts.find((attempt) => attempt.status === "rejected");
     expect(failed?.status).toBe("rejected");
     if (failed?.status === "rejected") expect(failed.reason).toBeInstanceOf(CodeUnavailableError);
-    expect((await prisma.redeemCode.findUniqueOrThrow({ where: { code } })).currentRedeems).toBe(1);
+    expect((await prisma.redeemCode.findUniqueOrThrow({ where: { code: code! } })).currentRedeems).toBe(1);
     expect(await prisma.codeRedemption.count()).toBe(1);
     expect(await prisma.creditTransaction.count({ where: { type: "REDEEM" } })).toBe(1);
     expect(await prisma.user.aggregate({ _sum: { credits: true } })).toMatchObject({ _sum: { credits: 30 } });
@@ -596,7 +822,7 @@ describe("exports and confirmed resets", () => {
       createdBy: OWNER_ID,
     });
     await redeemCode(prisma, user.id, code!);
-    await purchaseProduct(prisma, user.id, product.id, "purchase:backup");
+    const order = await purchaseProduct(prisma, user.id, product.id, "purchase:backup");
     await updateBonusSettings(prisma, { credits: 30, periodHours: 24 });
     await prisma.adminAudit.create({ data: { ownerTelegramId: OWNER_ID, action: "TEST_BEFORE_RESET" } });
 
@@ -608,6 +834,12 @@ describe("exports and confirmed resets", () => {
     expect(backup.codeRedemptions).toHaveLength(1);
     expect(backup.creditTransactions).toHaveLength(3);
     expect(backup.purchases).toHaveLength(1);
+    expect(backup.purchases[0]).toMatchObject({
+      id: order.purchaseId,
+      idempotencyKey: "purchase:backup",
+      batchId: order.purchaseId,
+      batchIndex: 0,
+    });
     expect(() => JSON.stringify(backup)).not.toThrow();
 
     const challenge = await createResetChallenge(prisma, OWNER_ID);
@@ -686,6 +918,8 @@ describe("broadcast and HTML output", () => {
       paid: 1,
       remainingCredits: 0,
       payload: "</pre><b>private</b>",
+      payloads: ["</pre><b>private</b>"],
+      quantity: 1,
       repeated: false,
     })).toContain("&lt;/pre&gt;&lt;b&gt;private&lt;/b&gt;");
   });
@@ -880,6 +1114,37 @@ describe("Telegram authorization and callback ownership", () => {
     expect((await prisma.user.findUniqueOrThrow({ where: { id: buyer.id } })).credits).toBe(60);
     expect(await prisma.creditTransaction.count({ where: { type: "PURCHASE" } })).toBe(1);
     expect((await prisma.inventoryItem.findUniqueOrThrow({ where: { id: purchase.inventoryItemId } })).status).toBe("SOLD");
+  });
+
+  it("renders all bulk items and the same total when Telegram retries a purchase callback", async () => {
+    const buyer = await makeUser(77_009n, 500);
+    const { product } = await makeProduct("Bulk callback replay", 40);
+    await addInventoryItems(prisma, product.id, ["callback-one", "callback-two", "callback-three"]);
+    const { bot, calls } = makeTestBot();
+    const telegramId = Number(buyer.telegramId);
+    await bot.handleUpdate(privateCallbackUpdate(telegramId, `buy:qty:${product.id}:3`));
+    const confirmation = calls.filter((call) => call.method === "editMessageText").at(-1);
+    const confirmData = richCallbackData(confirmation?.payload.rich_message)
+      .find((data) => data.startsWith("buy:confirm:"));
+    expect(confirmData).toBeDefined();
+    await bot.handleUpdate(privateCallbackUpdate(telegramId, confirmData!));
+    const firstDelivery = calls.filter((call) => call.method === "editMessageText").at(-1)?.payload.rich_message;
+
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 2_000);
+    try {
+      await bot.handleUpdate(privateCallbackUpdate(telegramId, confirmData!));
+    } finally {
+      clock.mockRestore();
+    }
+    const replayDelivery = calls.filter((call) => call.method === "editMessageText").at(-1)?.payload.rich_message;
+    expect(replayDelivery).toEqual(firstDelivery);
+    for (const payload of ["callback-one", "callback-two", "callback-three"]) {
+      expect(JSON.stringify(replayDelivery)).toContain(payload);
+    }
+    expect(JSON.stringify(replayDelivery)).toContain("120");
+    expect(await prisma.purchase.count()).toBe(3);
+    expect(await prisma.creditTransaction.count({ where: { type: "PURCHASE", amount: -120 } })).toBe(1);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: buyer.id } })).credits).toBe(380);
   });
 
   it("expires stale purchase-confirmation callbacks", async () => {
@@ -1182,9 +1447,9 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
       paid: purchase.paid,
       createdAt: new Date("2026-09-30T00:00:00Z"),
       payload: purchase.payload,
-      planDetails: purchase.planDetails,
-      deliveryInstructions: purchase.deliveryInstructions,
-      warrantyHours: purchase.warrantyHours,
+      planDetails: purchase.planDetails ?? "",
+      deliveryInstructions: purchase.deliveryInstructions ?? "",
+      warrantyHours: purchase.warrantyHours ?? 0,
     });
     expect(txt).toContain("Login / Email : crunchy@anime.jp");
     expect(txt).toContain("Password      : UltraSecret");
@@ -1388,6 +1653,12 @@ describe("smart account delivery, presets, order vault, warranty, and restock al
     const secondUnlimited = await purchaseProduct(prisma, buyer.id, unlimitedProduct.id, "purchase:unlim-2", 25, 1);
     expect(firstUnlimited.payload).toBe("https://example.com/private-guide");
     expect(secondUnlimited.payload).toBe("https://example.com/private-guide");
+    const unlimitedBulk = await purchaseProduct(prisma, buyer.id, unlimitedProduct.id, "purchase:unlim-bulk", 25, 3);
+    expect(await purchaseProduct(prisma, buyer.id, unlimitedProduct.id, "purchase:unlim-bulk"))
+      .toEqual({ ...unlimitedBulk, repeated: true });
+    expect(unlimitedBulk).toMatchObject({ quantity: 3, paid: 75 });
+    expect(unlimitedBulk.payloads).toEqual(Array(3).fill("https://example.com/private-guide"));
+    expect(await prisma.inventoryItem.count({ where: { productId: unlimitedProduct.id, status: "SOLD" } })).toBe(5);
     expect(await countAvailableInventory(prisma, unlimitedProduct.id)).toBe(1);
   });
 });

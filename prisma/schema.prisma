@@ -59,6 +59,7 @@ model User {
   creditTransactions CreditTransaction[]
   stockSubscriptions StockSubscription[]
   warrantyClaims     WarrantyClaim[]
+  wishlistItems      WishlistItem[]
 
   @@index([lastActiveAt])
   @@index([createdAt])
@@ -106,6 +107,7 @@ model Product {
   purchases          Purchase[]
   stockSubscriptions StockSubscription[]
   warrantyClaims     WarrantyClaim[]
+  wishlistItems      WishlistItem[]
 
   @@unique([categoryId, name])
   @@index([categoryId, enabled, deletedAt])
@@ -138,6 +140,8 @@ model Purchase {
   productId       String   @map("product_id")
   inventoryItemId String   @unique @map("inventory_item_id")
   idempotencyKey  String   @unique @map("idempotency_key") @db.VarChar(128)
+  batchId         String   @map("batch_id")
+  batchIndex      Int      @default(0) @map("batch_index")
   amountPaid      Int      @map("amount_paid")
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
@@ -146,6 +150,7 @@ model Purchase {
   inventoryItem InventoryItem  @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
   warrantyClaim WarrantyClaim?
 
+  @@unique([batchId, batchIndex])
   @@index([buyerId, createdAt])
   @@index([productId, createdAt])
   @@map("purchases")
@@ -266,4 +271,18 @@ model AppSetting {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("app_settings")
+}
+
+model WishlistItem {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  productId String   @map("product_id")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@index([userId, createdAt])
+  @@map("wishlist_items")
 }

@@ -150,3 +150,8 @@ src/generated/prisma/
 *.db
 .pglite/
 .tmp/
+
+# Mini App generated output and browser-test artifacts
+web/dist/
+playwright-report/
+test-results/

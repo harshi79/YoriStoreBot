@@ -30,7 +30,7 @@ const environmentSchema = z.object({
       (value) => value === "" || isPostgresUrl(value),
       "DATABASE_URL must be a valid PostgreSQL URL",
     ),
-  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  NODE_ENV: z.enum(["development", "test", "production"]).default("production"),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
   BONUS_CREDITS: z.coerce.number().int().min(1).max(1_000_000).default(25),
   BONUS_PERIOD_HOURS: z.coerce.number().int().min(1).max(720).default(24),
@@ -38,7 +38,22 @@ const environmentSchema = z.object({
   REFERRAL_WELCOME_CREDITS: z.coerce.number().int().min(0).max(1_000_000).default(5),
   DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(10),
   PM2_APP_NAME: z.string().optional().default(""),
+  MINI_APP_URL: z.string().trim().default("").refine((value) => {
+    if (!value) return true;
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" && !url.username && !url.password;
+    } catch { return false; }
+  }, "MINI_APP_URL must be a public HTTPS URL"),
   PORT: z.coerce.number().int().min(1).max(65535).optional(),
+}).superRefine((env, ctx) => {
+  if (env.NODE_ENV === "production" && !env.DATABASE_URL) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["DATABASE_URL"],
+      message: "DATABASE_URL is required in production; embedded or in-memory storage is not allowed",
+    });
+  }
 });
 
 export interface AppConfig {
@@ -53,6 +68,7 @@ export interface AppConfig {
   referralWelcomeCredits: number;
   databasePoolSize: number;
   pm2AppName: string;
+  miniAppUrl: string;
   port?: number | undefined;
 }
 
@@ -84,6 +100,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     REFERRAL_WELCOME_CREDITS: cleanOptionalString(source.REFERRAL_WELCOME_CREDITS),
     DATABASE_POOL_SIZE: cleanOptionalString(source.DATABASE_POOL_SIZE),
     PM2_APP_NAME: cleanOptionalString(source.PM2_APP_NAME),
+    MINI_APP_URL: cleanOptionalString(source.MINI_APP_URL),
     PORT: cleanOptionalString(source.PORT),
   };
 
@@ -106,6 +123,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     referralWelcomeCredits: parsed.data.REFERRAL_WELCOME_CREDITS,
     databasePoolSize: parsed.data.DATABASE_POOL_SIZE,
     pm2AppName: parsed.data.PM2_APP_NAME,
+    miniAppUrl: parsed.data.MINI_APP_URL,
     port: parsed.data.PORT,
   };
 }

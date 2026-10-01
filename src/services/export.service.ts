@@ -1,7 +1,7 @@
 import type { PrismaClient } from "../generated/prisma/client.js";
 
 export async function buildStoreExport(prisma: PrismaClient) {
-  const [users, categories, products, inventory, codes, redemptions, purchases, creditTransactions, settings, auditLog] =
+  const [users, categories, products, inventory, codes, redemptions, purchases, creditTransactions, settings, auditLog, wishlist] =
     await Promise.all([
       prisma.user.findMany({ orderBy: { createdAt: "asc" } }),
       prisma.category.findMany({ orderBy: [{ displayOrder: "asc" }, { name: "asc" }] }),
@@ -26,6 +26,7 @@ export async function buildStoreExport(prisma: PrismaClient) {
       prisma.creditTransaction.findMany({ orderBy: { createdAt: "asc" } }),
       prisma.appSetting.findMany({ orderBy: { key: "asc" } }),
       prisma.adminAudit.findMany({ orderBy: { createdAt: "asc" } }),
+      prisma.wishlistItem.findMany({ orderBy: { createdAt: "asc" } }),
     ]);
 
   return {
@@ -53,11 +54,15 @@ export async function buildStoreExport(prisma: PrismaClient) {
       productId: purchase.productId,
       productName: purchase.product.name,
       inventoryItemId: purchase.inventoryItemId,
+      idempotencyKey: purchase.idempotencyKey,
+      batchId: purchase.batchId,
+      batchIndex: purchase.batchIndex,
       amountPaid: purchase.amountPaid,
       createdAt: purchase.createdAt,
     })),
     creditTransactions,
     settings,
+    wishlist,
     adminAudit: auditLog.map((entry) => ({ ...entry, ownerTelegramId: entry.ownerTelegramId.toString() })),
   };
 }

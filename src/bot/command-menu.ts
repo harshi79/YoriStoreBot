@@ -10,6 +10,7 @@ export const PUBLIC_COMMANDS = [
   { command: "profile", description: "View your profile and credits" },
   { command: "wallet", description: "View your credit activity" },
   { command: "bonus", description: "Claim your daily credits" },
+  { command: "refer", description: "Invite friends and earn credits" },
   { command: "redeem", description: "Redeem a credit code" },
   { command: "orders", description: "View your purchase history" },
   { command: "help", description: "Get help using Iris" },

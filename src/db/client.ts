@@ -166,6 +166,13 @@ export async function ensureDatabaseSchema(
     `CREATE UNIQUE INDEX IF NOT EXISTS "warranty_claims_purchase_id_key" ON "warranty_claims"("purchase_id")`,
     `CREATE INDEX IF NOT EXISTS "warranty_claims_status_created_at_idx" ON "warranty_claims"("status", "created_at")`,
     `CREATE INDEX IF NOT EXISTS "warranty_claims_buyer_id_created_at_idx" ON "warranty_claims"("buyer_id", "created_at")`,
+    `ALTER TYPE "CreditTransactionType" ADD VALUE IF NOT EXISTS 'REFERRAL'`,
+    `ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "referred_by_id" TEXT`,
+    `ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "referred_at" TIMESTAMPTZ(6)`,
+    `ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "referral_reward_credits" INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "referral_welcome_credits" INTEGER NOT NULL DEFAULT 0`,
+    `CREATE INDEX IF NOT EXISTS "users_referred_by_id_referred_at_idx" ON "users"("referred_by_id", "referred_at")`,
+    `DO $$ BEGIN ALTER TABLE "users" ADD CONSTRAINT "users_referred_by_id_fkey" FOREIGN KEY ("referred_by_id") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
   ];
   for (const statement of upgradeStatements) {
     try {

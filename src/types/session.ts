@@ -17,6 +17,7 @@ export type AdminFlow =
   | { kind: "product:edit:emoji"; productId: string }
   | { kind: "inventory:add:payload"; productId: string }
   | { kind: "settings:bonus" }
+  | { kind: "settings:referral" }
   | { kind: "broadcast:message" }
   | { kind: "broadcast:confirm"; text: string };
 

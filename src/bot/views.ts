@@ -6,8 +6,14 @@ import {
   getUserPurchaseDetail,
   listUserPurchases,
 } from "../services/purchases.service.js";
-import { getBonusSettings } from "../services/settings.service.js";
+import { getBonusSettings, getReferralSettings } from "../services/settings.service.js";
 import { listUserCreditTransactions } from "../services/credits.service.js";
+import {
+  buildReferralLink,
+  buildReferralShareUrl,
+  getUserReferralSummary,
+  listUserReferrals,
+} from "../services/referrals.service.js";
 import {
   getProduct,
   isSubscribedToStock,
@@ -346,9 +352,10 @@ export async function showProfile(ctx: BotContext, deps: BotDependencies): Promi
     credits: deps.config.bonusCredits,
     periodHours: deps.config.bonusPeriodHours,
   });
-  const [purchaseCount, bonusStatus] = await Promise.all([
+  const [purchaseCount, bonusStatus, referralSummary] = await Promise.all([
     countUserPurchases(deps.database.prisma, user.id),
     getBonusStatus(deps.database.prisma, user.id, settings.periodHours),
+    getUserReferralSummary(deps.database.prisma, user.id),
   ]);
 
   let photoFileId = user.profilePhotoFileId;
@@ -370,6 +377,8 @@ export async function showProfile(ctx: BotContext, deps: BotDependencies): Promi
     telegramId: BigInt(ctx.from!.id),
     credits: user.credits,
     purchaseCount,
+    referralCount: referralSummary.totalReferrals,
+    referralEarned: referralSummary.totalEarned,
     createdAt: user.createdAt,
     lastActiveAt: user.lastActiveAt,
     nextBonusAt: bonusStatus.nextAvailableAt,
@@ -386,6 +395,9 @@ export async function showProfile(ctx: BotContext, deps: BotDependencies): Promi
   const nextBonus = bonusStatus.available
     ? smallCaps("Ready to claim")
     : bonusStatus.nextAvailableAt ? formatDate(bonusStatus.nextAvailableAt) : smallCaps("Not set");
+  const referralSummaryText = referralSummary.totalEarned > 0
+    ? `${referralSummary.totalReferrals.toLocaleString("en-US")} (+${creditLabel(referralSummary.totalEarned)})`
+    : referralSummary.totalReferrals.toLocaleString("en-US");
   const blocks: InputRichBlock[] = [
     richPhoto,
     richHeading([smallCaps("👤 Profile · "), displayName], 1),
@@ -394,6 +406,7 @@ export async function showProfile(ctx: BotContext, deps: BotDependencies): Promi
       ["Telegram ID", { type: "code", text: ctx.from!.id.toString() }],
       ["Credits", creditLabel(user.credits)],
       ["Purchases", purchaseCount.toLocaleString("en-US")],
+      ["Referrals", referralSummaryText],
       ["Joined", formatDate(user.createdAt)],
       ["Last active", formatDate(user.lastActiveAt)],
       ["Daily bonus", bonusStatus.available ? smallCaps("Ready to claim") : smallCaps("Claimed")],
@@ -405,6 +418,9 @@ export async function showProfile(ctx: BotContext, deps: BotDependencies): Promi
     ]),
     richButtonRow([
       richCallbackButton("🎁 Bonus", "nav:bonus"),
+      richCallbackButton("🤝 Refer & earn", "nav:refer"),
+    ]),
+    richButtonRow([
       richCallbackButton("📦 Orders", "nav:orders"),
       richCallbackButton("◀ Main menu", "nav:home", "link"),
     ]),
@@ -420,6 +436,7 @@ const CREDIT_TYPE_ICONS: Record<string, string> = {
   PURCHASE: "🛍️",
   REFUND: "↩️",
   ADMIN_ADJUSTMENT: "⚙️",
+  REFERRAL: "🤝",
 };
 
 export async function showWallet(ctx: BotContext, deps: BotDependencies, requestedPage = 0): Promise<void> {
@@ -813,6 +830,201 @@ export async function showWarrantyPrompt(
     richButtonRow([richCallbackButton("◀ Back to order", `order:view:${purchase.id}`, "link")]),
   ];
   await showRichView(ctx, deps, blocks, text, keyboard);
+}
+
+export async function showReferrals(ctx: BotContext, deps: BotDependencies): Promise<void> {
+  const user = await findUserByTelegramId(deps.database.prisma, ctx.from!.id);
+  const [settings, summary] = await Promise.all([
+    getReferralSettings(deps.database.prisma, {
+      referrerCredits: deps.config.referralRewardCredits,
+      inviteeCredits: deps.config.referralWelcomeCredits,
+    }),
+    getUserReferralSummary(deps.database.prisma, user.id),
+  ]);
+
+  const botUsername = ctx.me?.username || "IrisStoreBot";
+  const referralLink = buildReferralLink(botUsername, user.telegramId);
+  const shareUrl = buildReferralShareUrl(referralLink, settings.inviteeCredits);
+
+  const keyboard = new InlineKeyboard()
+    .url(smallCaps("📤 SHARE INVITE LINK"), shareUrl)
+    .row()
+    .text(smallCaps(`👥 MY REFERRALS (${summary.totalReferrals})`), "refer:list:0")
+    .text(smallCaps("💳 WALLET"), "nav:wallet")
+    .row()
+    .text(smallCaps("🛍 STORE"), "nav:store")
+    .text(smallCaps("🏠 HOME"), "nav:home");
+
+  const statusLabel = settings.enabled ? smallCaps("Active") : smallCaps("Paused");
+  const friendRewardLabel = settings.inviteeCredits > 0
+    ? `+${creditLabel(settings.inviteeCredits)} ${smallCaps("on join")}`
+    : smallCaps("None");
+  const referrerRewardLabel = settings.referrerCredits > 0
+    ? `+${creditLabel(settings.referrerCredits)} ${smallCaps("per friend")}`
+    : smallCaps("None");
+
+  const referredByLine = summary.referredBy
+    ? `\n🤝 <b>${smallCaps("Invited by")}:</b> ${
+        summary.referredBy.username
+          ? `@${escapeHtml(summary.referredBy.username)}`
+          : escapeHtml(summary.referredBy.firstName || `ID ${summary.referredBy.telegramId.toString()}`)
+      }`
+    : "";
+
+  const fallback = `🤝 <b>${smallCaps("Refer & earn")}</b>\n\n` +
+    `${smallCaps(
+      settings.enabled
+        ? "Invite friends with your personal link. Credits are granted automatically as soon as a new user starts Iris from your invite link."
+        : "Referral rewards are currently paused by the store owner.",
+    )}\n\n` +
+    `🔗 <b>${smallCaps("Your invite link")}:</b>\n<code>${escapeHtml(referralLink)}</code>\n\n` +
+    `✦ <b>${smallCaps("Your reward")}:</b> ${referrerRewardLabel}\n` +
+    `🎁 <b>${smallCaps("Friend welcome bonus")}:</b> ${friendRewardLabel}\n` +
+    `👥 <b>${smallCaps("Friends referred")}:</b> ${summary.totalReferrals}\n` +
+    `💰 <b>${smallCaps("Total earned")}:</b> ${creditLabel(summary.totalEarned)}` +
+    referredByLine;
+
+  const tableRows: Array<[string, RichText]> = [
+    ["Status", statusLabel],
+    ["Your reward", referrerRewardLabel],
+    ["Friend welcome bonus", friendRewardLabel],
+    ["Friends referred", summary.totalReferrals.toLocaleString("en-US")],
+    ["Total earned", creditLabel(summary.totalEarned)],
+    ...(summary.referredBy
+      ? [[
+          "Invited by",
+          summary.referredBy.username
+            ? `@${summary.referredBy.username}`
+            : summary.referredBy.firstName || `User ${summary.referredBy.telegramId.toString()}`,
+        ] as [string, RichText]]
+      : []),
+    ["Invite link", { type: "code", text: referralLink }],
+  ];
+
+  const blocks: InputRichBlock[] = [
+    richHeading("🤝 Refer & earn", 1),
+    richParagraph(
+      settings.enabled
+        ? "Share your personal invite link. When a brand-new friend starts Iris using your link, rewards are credited automatically."
+        : "The referral program is currently paused by the store owner.",
+      true,
+    ),
+    richKeyValueTable(tableRows, "Referral program"),
+    richButtonRow([
+      { text: smallCaps("📤 Share invite link"), url: shareUrl },
+      richCallbackButton(`👥 My referrals · ${summary.totalReferrals}`, "refer:list:0", "primary"),
+    ]),
+    richButtonRow([
+      richCallbackButton("💳 Wallet", "nav:wallet"),
+      richCallbackButton("🛍 Store", "nav:store"),
+      richCallbackButton("🏠 Home", "nav:home", "link"),
+    ]),
+    richFooter(smallCaps("Only new users joining Iris for the first time count toward referral rewards. Self-referrals are ignored.")),
+  ];
+
+  await showRichView(ctx, deps, blocks, fallback, keyboard);
+}
+
+export async function showMyReferrals(
+  ctx: BotContext,
+  deps: BotDependencies,
+  requestedPage = 0,
+): Promise<void> {
+  const user = await findUserByTelegramId(deps.database.prisma, ctx.from!.id);
+  const [settings, list] = await Promise.all([
+    getReferralSettings(deps.database.prisma, {
+      referrerCredits: deps.config.referralRewardCredits,
+      inviteeCredits: deps.config.referralWelcomeCredits,
+    }),
+    listUserReferrals(deps.database.prisma, user.id, requestedPage, PAGE_SIZE),
+  ]);
+
+  const botUsername = ctx.me?.username || "IrisStoreBot";
+  const referralLink = buildReferralLink(botUsername, user.telegramId);
+  const shareUrl = buildReferralShareUrl(referralLink, settings.inviteeCredits);
+
+  const keyboard = new InlineKeyboard();
+  if (list.pages > 1) {
+    if (list.page > 0) keyboard.text(smallCaps("◀"), `refer:list:${list.page - 1}`);
+    keyboard.text(smallCaps(`${list.page + 1}/${list.pages}`), "noop");
+    if (list.page + 1 < list.pages) keyboard.text(smallCaps("▶"), `refer:list:${list.page + 1}`);
+    keyboard.row();
+  }
+  keyboard
+    .url(smallCaps("📤 SHARE INVITE LINK"), shareUrl)
+    .row()
+    .text(smallCaps("◀ REFER & EARN"), "nav:refer")
+    .text(smallCaps("🏠 HOME"), "nav:home");
+
+  if (list.total === 0) {
+    const fallback = `👥 <b>${smallCaps("My referrals")}</b>\n\n` +
+      `${smallCaps("No friends have joined from your invite link yet.")}\n\n` +
+      `🔗 <b>${smallCaps("Your invite link")}:</b>\n<code>${escapeHtml(referralLink)}</code>`;
+    const blocks: InputRichBlock[] = [
+      richHeading("👥 My referrals", 1),
+      richKeyValueTable([
+        ["Friends referred", "0"],
+        ["Total earned", creditLabel(0)],
+        ["Invite link", { type: "code", text: referralLink }],
+      ], "Referral summary"),
+      richParagraph("No friends have joined from your invite link yet. Share your link below to start earning credits!", true),
+      richButtonRow([
+        { text: smallCaps("📤 Share invite link"), url: shareUrl },
+      ]),
+      richButtonRow([
+        richCallbackButton("◀ Refer & earn", "nav:refer", "link"),
+        richCallbackButton("🏠 Home", "nav:home", "link"),
+      ]),
+    ];
+    await showRichView(ctx, deps, blocks, fallback, keyboard);
+    return;
+  }
+
+  const formatReferredFriend = (item: (typeof list.referrals)[number]): string => {
+    const fullName = [item.firstName, item.lastName].filter(Boolean).join(" ").trim();
+    if (fullName && item.username) return `${fullName} (@${item.username})`;
+    if (item.username) return `@${item.username}`;
+    if (fullName) return fullName;
+    const rawId = item.telegramId.toString();
+    return `User ···${rawId.slice(-4)}`;
+  };
+
+  const rows = list.referrals.map((item) => [
+    truncate(formatReferredFriend(item), 48),
+    `+${creditLabel(item.referralRewardCredits)}`,
+    formatDate(item.referredAt ?? item.createdAt),
+  ]);
+
+  const fallbackLines = list.referrals.map((item) => {
+    const label = escapeHtml(truncate(formatReferredFriend(item), 48));
+    return `• <b>${label}</b> — +${creditLabel(item.referralRewardCredits)}\n  <i>${escapeHtml(formatDate(item.referredAt ?? item.createdAt))}</i>`;
+  });
+
+  const fallback = `👥 <b>${smallCaps("My referrals")}</b> · ${list.total}\n\n` +
+    `💰 <b>${smallCaps("Total earned")}:</b> ${creditLabel(list.totalEarned)}\n\n` +
+    `${fallbackLines.join("\n\n")}`;
+
+  const blocks: InputRichBlock[] = [
+    richHeading(`👥 My referrals · ${list.total}`, 1),
+    richKeyValueTable([
+      ["Friends referred", list.total.toLocaleString("en-US")],
+      ["Total earned", creditLabel(list.totalEarned)],
+    ], "Referral summary"),
+    richDataTable(["Friend", "Reward", "Joined"], rows, "Referred friends", ["left", "right", "right"]),
+    ...(list.pages > 1
+      ? [richPageButtons(list.page, list.pages, `refer:list:${list.page - 1}`, `refer:list:${list.page + 1}`)]
+      : []),
+    richButtonRow([
+      { text: smallCaps("📤 Share invite link"), url: shareUrl },
+    ]),
+    richButtonRow([
+      richCallbackButton("◀ Refer & earn", "nav:refer", "link"),
+      richCallbackButton("💳 Wallet", "nav:wallet"),
+      richCallbackButton("🏠 Home", "nav:home", "link"),
+    ]),
+  ];
+
+  await showRichView(ctx, deps, blocks, fallback, keyboard);
 }
 
 export async function showHelp(ctx: BotContext, deps: BotDependencies): Promise<void> {

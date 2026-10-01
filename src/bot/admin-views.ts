@@ -617,18 +617,28 @@ export async function showUsersAdmin(ctx: BotContext, deps: BotDependencies, pag
 export async function showUserDetail(ctx: BotContext, deps: BotDependencies, userId: string): Promise<void> {
   const user = await deps.database.prisma.user.findUnique({
     where: { id: userId },
-    include: { _count: { select: { purchases: true, creditTransactions: true } } },
+    include: {
+      referredBy: { select: { telegramId: true, username: true, firstName: true } },
+      _count: { select: { purchases: true, creditTransactions: true, referrals: true } },
+    },
   });
   if (!user) {
     await editOrReply(ctx, smallCaps("That user no longer exists."), adminBackKeyboard(), deps.logger);
     return;
   }
   const name = [user.firstName, user.lastName].filter(Boolean).join(" ") || "Iris user";
+  const referredByText = user.referredBy
+    ? user.referredBy.username
+      ? `@${user.referredBy.username} (${user.referredBy.telegramId.toString()})`
+      : `${user.referredBy.firstName ?? "User"} (${user.referredBy.telegramId.toString()})`
+    : smallCaps("None");
   const text = `👤 <b>${escapeHtml(smallCaps(name))}</b>\n\n` +
     `<b>${smallCaps("Username")}:</b> ${user.username ? `@${escapeHtml(user.username)}` : smallCaps("Not set")}\n` +
     `<b>${smallCaps("Telegram ID")}:</b> <code>${user.telegramId.toString()}</code>\n` +
     `<b>${smallCaps("Credits")}:</b> ${creditLabel(user.credits)}\n` +
     `<b>${smallCaps("Purchases")}:</b> ${user._count.purchases}\n` +
+    `<b>${smallCaps("Referrals")}:</b> ${user._count.referrals}\n` +
+    `<b>${smallCaps("Referred by")}:</b> ${escapeHtml(referredByText)}\n` +
     `<b>${smallCaps("Transactions")}:</b> ${user._count.creditTransactions}\n` +
     `<b>${smallCaps("Joined")}:</b> ${escapeHtml(formatDate(user.createdAt))}\n` +
     `<b>${smallCaps("Last active")}:</b> ${escapeHtml(formatDate(user.lastActiveAt))}`;
@@ -644,6 +654,8 @@ export async function showUserDetail(ctx: BotContext, deps: BotDependencies, use
       ["Telegram ID", { type: "code", text: user.telegramId.toString() }],
       ["Credits", creditLabel(user.credits)],
       ["Purchases", user._count.purchases.toLocaleString("en-US")],
+      ["Referrals", user._count.referrals.toLocaleString("en-US")],
+      ["Referred by", referredByText],
       ["Transactions", user._count.creditTransactions.toLocaleString("en-US")],
       ["Joined", formatDate(user.createdAt)],
       ["Last active", formatDate(user.lastActiveAt)],
@@ -735,6 +747,7 @@ export async function showStatistics(ctx: BotContext, deps: BotDependencies): Pr
   );
   const text = `📊 <b>${smallCaps("Store statistics")}</b>\n\n` +
     `👥 ${smallCaps("Users")}: ${stats.users}\n` +
+    `🤝 ${smallCaps("Referrals")}: ${stats.referrals}\n` +
     `🟢 ${smallCaps("Active 24h")}: ${stats.active24h}\n` +
     `🟢 ${smallCaps("Active 72h")}: ${stats.active72h}\n` +
     `📦 ${smallCaps("Products")}: ${stats.products}\n` +
@@ -747,6 +760,7 @@ export async function showStatistics(ctx: BotContext, deps: BotDependencies): Pr
     richHeading("📊 Store statistics", 1),
     richKeyValueTable([
       ["Users", stats.users.toLocaleString("en-US")],
+      ["Referrals", stats.referrals.toLocaleString("en-US")],
       ["Active · 24 hours", stats.active24h.toLocaleString("en-US")],
       ["Active · 72 hours", stats.active72h.toLocaleString("en-US")],
       ["Products", stats.products.toLocaleString("en-US")],
@@ -831,24 +845,34 @@ export async function showCreditsManagement(ctx: BotContext, deps: BotDependenci
 
 export async function showSettings(ctx: BotContext, deps: BotDependencies): Promise<void> {
   const settings = await deps.database.prisma.appSetting.findMany({ orderBy: { key: "asc" } });
-  const bonus = await import("../services/settings.service.js").then(({ getBonusSettings }) =>
+  const { getBonusSettings, getReferralSettings } = await import("../services/settings.service.js");
+  const [bonus, referral] = await Promise.all([
     getBonusSettings(deps.database.prisma, {
       credits: deps.config.bonusCredits,
       periodHours: deps.config.bonusPeriodHours,
     }),
-  );
+    getReferralSettings(deps.database.prisma, {
+      referrerCredits: deps.config.referralRewardCredits,
+      inviteeCredits: deps.config.referralWelcomeCredits,
+    }),
+  ]);
   const stored = settings.length ? settings.map((item) => `${escapeHtml(item.key)}: ${escapeHtml(item.value)}`).join("\n") : smallCaps("No custom settings.");
+  const referralSummary = `${referral.enabled ? smallCaps("Enabled") : smallCaps("Disabled")} · +${creditLabel(referral.referrerCredits)} ${smallCaps("referrer")} / +${creditLabel(referral.inviteeCredits)} ${smallCaps("welcome")}`;
   const text = `⚙️ <b>${smallCaps("Settings")}</b>\n\n` +
     `<b>${smallCaps("Owner ID")}:</b> <code>${deps.config.ownerId.toString()}</code>\n` +
     `<b>${smallCaps("Daily bonus")}:</b> ${creditLabel(bonus.credits)} ${smallCaps("every")} ${bonus.periodHours}h\n` +
-    `<b>${smallCaps("Bonus configuration")}:</b> ${smallCaps("Environment defaults with owner overrides")}\n\n` +
+    `<b>${smallCaps("Referral program")}:</b> ${referralSummary}\n` +
+    `<b>${smallCaps("Configuration")}:</b> ${smallCaps("Environment defaults with owner overrides")}\n\n` +
     `<b>${smallCaps("Stored settings")}</b>\n${stored}`;
   const blocks: InputRichBlock[] = [
     richHeading("⚙️ Settings", 1),
     richKeyValueTable([
       ["Owner ID", { type: "code", text: deps.config.ownerId.toString() }],
       ["Daily bonus", `${creditLabel(bonus.credits)} ${smallCaps("every")} ${bonus.periodHours}h`],
-      ["Bonus configuration", smallCaps("Environment defaults with owner overrides")],
+      ["Referral status", statusText(referral.enabled)],
+      ["Referrer reward", `+${creditLabel(referral.referrerCredits)}`],
+      ["Friend welcome bonus", `+${creditLabel(referral.inviteeCredits)}`],
+      ["Configuration", smallCaps("Environment defaults with owner overrides")],
     ], "Runtime settings"),
     richDataTable(
       ["Setting", "Value"],
@@ -857,16 +881,33 @@ export async function showSettings(ctx: BotContext, deps: BotDependencies): Prom
     ),
     richButtonRow([
       richCallbackButton("🎁 Edit bonus settings", "admin:settings:bonus", "primary"),
+      richCallbackButton("🤝 Edit referral rewards", "admin:settings:referral", "primary"),
+    ]),
+    richButtonRow([
+      richCallbackButton(
+        referral.enabled ? "⏸ Disable referrals" : "▶ Enable referrals",
+        "admin:settings:referral:toggle",
+        referral.enabled ? "danger" : "success",
+      ),
       richCallbackButton("◀ Admin", "admin:panel", "link"),
     ]),
   ];
   if (settings.length === 0) blocks.splice(2, 0, richParagraph("No custom settings are stored.", true));
+  const keyboard = new InlineKeyboard()
+    .text(smallCaps("🎁 EDIT BONUS SETTINGS"), "admin:settings:bonus")
+    .text(smallCaps("🤝 EDIT REFERRAL REWARDS"), "admin:settings:referral")
+    .row()
+    .text(
+      smallCaps(referral.enabled ? "⏸ DISABLE REFERRALS" : "▶ ENABLE REFERRALS"),
+      "admin:settings:referral:toggle",
+    )
+    .text(smallCaps("◀ ADMIN"), "admin:panel");
   await showRichView(
     ctx,
     deps,
     blocks,
     text,
-    new InlineKeyboard().text(smallCaps("🎁 EDIT BONUS SETTINGS"), "admin:settings:bonus").row().text(smallCaps("◀ ADMIN"), "admin:panel"),
+    keyboard,
   );
 }
 

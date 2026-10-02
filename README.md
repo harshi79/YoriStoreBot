@@ -128,7 +128,7 @@ To do the same recovery by hand, back up the database and verify its schema matc
 
 ## User features
 
-- `/start` sends Iris's welcome video (`https://imglink.cc/cdn/jw1NZXEQQS.mp4`) with a text fallback and inline navigation.
+- `/start` sends Iris's welcome video (`https://imglink.cc/cdn/rCEZkzLQra.mp4`) with a text fallback and inline navigation.
 - `/start`, `/app`, `/store`, `/search QUERY`, `/profile`, `/wallet`, `/bonus`, `/redeem CODE`, `/orders`, `/help`, and `/cancel` are available in private chats; `/admin` appears in the menu but is owner-only. `/wallet` shows the current balance and a private, paginated credit ledger with each change and the resulting balance.
 - Categories and products come from PostgreSQL; products show current stock and credit prices. Interactive screens use Telegram Bot API 10.3 rich messages: compact item/order tables, styled in-message buttons, and expandable delivery notes. If a rich message cannot be sent or edited, Iris falls back to HTML and inline keyboards.
 - `/orders` keeps a private, paginated purchase history. Opening an order shows parsed email/login, password, plan fields, and delivery rules; users can also download a `.txt` receipt. Order history and delivery screens use Rich Message tables with an HTML fallback.

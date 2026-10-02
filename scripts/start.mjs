@@ -34,6 +34,15 @@ const BASELINEABLE_CONFLICT =
  */
 const SCHEMA_NOT_EMPTY = /P3005|database schema is not empty/i;
 
+/**
+ * Prisma error P1002: the database server was reached, but timed out (most
+ * commonly while waiting on `SELECT pg_advisory_lock(72707369)` during a
+ * rolling deploy or serverless cold start). These are transient and safe to
+ * retry after a short backoff.
+ */
+const TRANSIENT_MIGRATION_TIMEOUT =
+  /P1002|pg_advisory_lock|advisory lock|database server was reached but timed out/i;
+
 /** Directory holding the committed migrations, relative to the project root. */
 const MIGRATIONS_DIR = path.join("prisma", "migrations");
 
@@ -87,6 +96,15 @@ export function isSchemaNotEmpty(output) {
   return Boolean(output) && SCHEMA_NOT_EMPTY.test(output);
 }
 
+export function isTransientMigrationTimeout(output) {
+  return Boolean(output) && TRANSIENT_MIGRATION_TIMEOUT.test(output);
+}
+
+function defaultSleep(delayMs) {
+  if (delayMs <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+}
+
 /**
  * Committed migration names, oldest first. Migration directories carry a
  * timestamp prefix, so lexicographic order is chronological order. Anything
@@ -136,16 +154,32 @@ export function applyPendingMigrations({
   prisma = resolvePrismaCommand(root),
   log = console,
   maxAttempts = 12,
+  maxTimeoutRetries = 3,
+  retryDelayMs = 2_000,
+  sleep = runner === defaultRunner ? defaultSleep : () => {},
 } = {}) {
   if (!databaseUrl) return { status: "skipped", baselined: [], output: "" };
   if (!prisma) return { status: "unavailable", baselined: [], output: "" };
 
   const baselined = [];
   let output = "";
+  let timeoutRetries = 0;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const deploy = runner(prisma.command, [...prisma.args, "migrate", "deploy"], { root, databaseUrl });
     output = deploy.output;
     if (deploy.status === 0) return { status: "applied", baselined, output };
+
+    if (isTransientMigrationTimeout(deploy.output) && timeoutRetries < maxTimeoutRetries) {
+      timeoutRetries += 1;
+      const delayMs = retryDelayMs * timeoutRetries;
+      log.warn?.(
+        `Database migration timed out waiting for the server or advisory lock ` +
+          `(retry ${timeoutRetries}/${maxTimeoutRetries} in ${delayMs}ms)...`,
+      );
+      sleep(delayMs);
+      attempt -= 1;
+      continue;
+    }
 
     const conflicted = migrationToBaseline(deploy.output);
     // P3005 means deploy refused to start on a database with tables but no
@@ -173,6 +207,17 @@ export function applyPendingMigrations({
       { root, databaseUrl },
     );
     if (resolved.status !== 0) {
+      if (isTransientMigrationTimeout(resolved.output) && timeoutRetries < maxTimeoutRetries) {
+        timeoutRetries += 1;
+        const delayMs = retryDelayMs * timeoutRetries;
+        log.warn?.(
+          `Database migration resolve timed out waiting for the server or advisory lock ` +
+            `(retry ${timeoutRetries}/${maxTimeoutRetries} in ${delayMs}ms)...`,
+        );
+        sleep(delayMs);
+        attempt -= 1;
+        continue;
+      }
       const combined = `${deploy.output}\n${resolved.output}`;
       return {
         status: isMigrationToolingUnavailable(resolved.output) ? "unavailable" : "failed",

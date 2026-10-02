@@ -4,6 +4,7 @@ import {
   applyPendingMigrations,
   isMigrationToolingUnavailable,
   isSchemaNotEmpty,
+  isTransientMigrationTimeout,
   listMigrations,
   migrationToBaseline,
   readDatabaseUrl,
@@ -331,5 +332,69 @@ describe("applyPendingMigrations with unusable tooling", () => {
     expect(result.status).toBe("unavailable");
     expect(result.baselined).toEqual([]);
     expect(calls).toHaveLength(2);
+  });
+});
+
+describe("applyPendingMigrations on transient P1002 / advisory-lock timeouts", () => {
+  const P1002_OUTPUT = [
+    'Datasource "db": PostgreSQL database "neondb", schema "public" at "ep-red-sun-b3oaelqw-pooler.c-4.ap-southeast-1.aws.neon.tech"',
+    "3 migrations found in prisma/migrations",
+    "Error: P1002",
+    "The database server was reached but timed out.",
+    "Context: Timed out trying to acquire a postgres advisory lock (SELECT pg_advisory_lock(72707369)). Timeout: 10000ms.",
+  ].join("\n");
+
+  it("recognises P1002 and advisory lock timeouts as transient", () => {
+    expect(isTransientMigrationTimeout(P1002_OUTPUT)).toBe(true);
+    expect(isTransientMigrationTimeout("Timed out trying to acquire a postgres advisory lock")).toBe(true);
+    expect(isTransientMigrationTimeout("Error: P1001 Can't reach database server")).toBe(false);
+    expect(isTransientMigrationTimeout("")).toBe(false);
+  });
+
+  it("retries deploy with linear backoff when P1002 occurs, then succeeds", () => {
+    const { runner, calls } = fakeRunner([
+      { status: 1, output: P1002_OUTPUT },
+      { status: 1, output: P1002_OUTPUT },
+      { status: 0, output: "No pending migrations to apply." },
+    ]);
+    const log = makeLog();
+    const sleep = vi.fn();
+    const result = applyPendingMigrations({
+      databaseUrl: DATABASE_URL,
+      runner,
+      prisma,
+      log,
+      retryDelayMs: 2_000,
+      sleep,
+    });
+    expect(result.status).toBe("applied");
+    expect(result.baselined).toEqual([]);
+    expect(calls.map((call) => call.args)).toEqual([
+      ["migrate", "deploy"],
+      ["migrate", "deploy"],
+      ["migrate", "deploy"],
+    ]);
+    expect(sleep).toHaveBeenNthCalledWith(1, 2_000);
+    expect(sleep).toHaveBeenNthCalledWith(2, 4_000);
+    expect(log.warn).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops retrying after maxTimeoutRetries and reports failed", () => {
+    const { runner, calls } = fakeRunner([{ status: 1, output: P1002_OUTPUT }]);
+    const sleep = vi.fn();
+    const result = applyPendingMigrations({
+      databaseUrl: DATABASE_URL,
+      runner,
+      prisma,
+      log: makeLog(),
+      maxTimeoutRetries: 3,
+      retryDelayMs: 1_000,
+      sleep,
+    });
+    expect(result.status).toBe("failed");
+    expect(result.output).toContain("P1002");
+    // 1 initial attempt + 3 retries = 4 deploy calls.
+    expect(calls).toHaveLength(4);
+    expect(sleep).toHaveBeenCalledTimes(3);
   });
 });

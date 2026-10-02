@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" width="400" height="300" role="img" aria-label="Lightroom presets artwork">
+  <defs>
+    <linearGradient id="lr" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0c264b"/><stop offset="1" stop-color="#155089"/>
+    </linearGradient>
+  </defs>
+  <rect width="400" height="300" fill="url(#lr)"/>
+  <circle cx="200" cy="150" r="126" fill="none" stroke="#88c7ef" stroke-opacity=".28" stroke-width="1.5"/>
+  <circle cx="200" cy="150" r="156" fill="none" stroke="#88c7ef" stroke-opacity=".14" stroke-width="1.5"/>
+  <rect x="132" y="96" width="136" height="108" rx="20" fill="#0a1f3d" stroke="#88c7ef" stroke-width="4"/>
+  <text x="200" y="176" text-anchor="middle" font-family="Georgia,serif" font-size="66" fill="#88c7ef">Lr</text>
+</svg>

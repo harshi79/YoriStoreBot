@@ -267,6 +267,7 @@ export async function showProductAdmin(ctx: BotContext, deps: BotDependencies, p
     `<b>${smallCaps("Restock subscribers")}:</b> ${product._count.stockSubscriptions}\n` +
     `<b>${smallCaps("Warranty")}:</b> ${product.warrantyHours > 0 ? `${product.warrantyHours}h ${smallCaps("replacement")}` : smallCaps("None (0h)")}\n` +
     `<b>${smallCaps("Banner photo")}:</b> ${product.mediaFileId ? smallCaps("Attached 🖼") : smallCaps("None")}\n` +
+    `<b>${smallCaps("Web image")}:</b> ${product.imageUrl ? `<code>${escapeHtml(product.imageUrl.length > 46 ? `${product.imageUrl.slice(0, 43)}…` : product.imageUrl)}</code>` : smallCaps("None (branded tile shown)")}\n` +
     `<b>${smallCaps("Status")}:</b> ${status}\n\n` +
     `💎 <b>${smallCaps("Plan / Account specs")}:</b>\n${escapeHtml(product.planDetails || smallCaps("Not set (use presets or plan specs)"))}\n\n` +
     `📜 <b>${smallCaps("Login guide & rules")}:</b>\n${escapeHtml(product.deliveryInstructions || smallCaps("Not set (use presets or login guide)"))}\n\n` +
@@ -281,6 +282,7 @@ export async function showProductAdmin(ctx: BotContext, deps: BotDependencies, p
     { text: "💳 Price", data: `admin:product:edit:price:${product.id}` },
     { text: "🎨 Icon", data: `admin:product:edit:emoji:${product.id}` },
     { text: "🖼 Banner", data: `admin:product:edit:media:${product.id}` },
+    { text: "🌐 Web image", data: `admin:product:edit:image:${product.id}` },
     { text: product.featured ? "🔥 Unfeature" : "🔥 Feature", data: `admin:product:featured:${product.id}` },
     { text: product.isUnlimited ? "♾ Unlimited: on" : "♾ Unlimited: off", data: `admin:product:unlimited:${product.id}` },
     { text: "🗂 Category", data: `admin:product:category:${product.id}` },
@@ -301,6 +303,7 @@ export async function showProductAdmin(ctx: BotContext, deps: BotDependencies, p
       ["Restock subscribers", product._count.stockSubscriptions.toLocaleString("en-US")],
       ["Warranty", product.warrantyHours > 0 ? `${product.warrantyHours}h ${smallCaps("replacement")}` : smallCaps("None (0h)")],
       ["Banner photo", product.mediaFileId ? smallCaps("Attached 🖼") : smallCaps("None")],
+      ["Web image", product.imageUrl ? smallCaps("Set 🌐") : smallCaps("None (branded tile)")],
       ["Status", status],
     ], "Product record"),
     ...(product.planDetails.trim() ? [{ type: "expandable_blockquote" as const, text: product.planDetails.trim(), credit: smallCaps("Plan / account specs") }] : []),

@@ -286,6 +286,7 @@ describe("listMigrations", () => {
       "20260930000000_init",
       "20261002000000_purchase_batches",
       "20261002010000_mini_app_wishlist",
+      "20261002020000_product_image_url",
     ]);
   });
 

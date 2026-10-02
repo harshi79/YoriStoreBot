@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 import { PrismaPGlite } from "pglite-prisma-adapter";
 import { describe, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import { purchaseProduct } from "../src/services/purchases.service.js";
 
 const initialMigration = new URL("../prisma/migrations/20260930000000_init/migration.sql", import.meta.url);
 const batchMigration = new URL("../prisma/migrations/20261002000000_purchase_batches/migration.sql", import.meta.url);
+const migrationsRoot = new URL("../prisma/migrations/", import.meta.url);
 const checkoutTime = "2026-10-01T12:00:00.000Z";
 
 interface LegacyPurchase {
@@ -83,6 +84,13 @@ describe("purchase batch migration", () => {
       await pg.exec(await readFile(batchMigration, "utf8"));
       expect((await pg.query("SELECT id, idempotency_key, amount_paid, inventory_item_id FROM purchases ORDER BY id")).rows)
         .toEqual(originalRows.rows);
+
+      // Finish migrating to the current schema. The legacy-data assertions above are the point of
+      // this test and run first; afterwards the service layer needs every committed column.
+      const laterMigrations = (await readdir(migrationsRoot))
+        .filter((name) => /^\d/.test(name) && name > "20261002000000_purchase_batches")
+        .sort();
+      for (const name of laterMigrations) await pg.exec(await readFile(new URL(`${name}/migration.sql`, migrationsRoot), "utf8"));
 
       const grouped = await pg.query<{ id: string; batch_id: string; batch_index: number }>(
         "SELECT id, batch_id, batch_index FROM purchases ORDER BY id",

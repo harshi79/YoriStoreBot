@@ -13,6 +13,7 @@ export type AdminFlow =
   | { kind: "product:edit:instructions"; productId: string }
   | { kind: "product:edit:warranty"; productId: string }
   | { kind: "product:edit:media"; productId: string }
+  | { kind: "product:edit:image"; productId: string }
   | { kind: "product:edit:price"; productId: string }
   | { kind: "product:edit:emoji"; productId: string }
   | { kind: "inventory:add:payload"; productId: string }

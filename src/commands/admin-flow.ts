@@ -191,7 +191,7 @@ function allowsSkip(flow: AdminFlow): boolean {
     flow.kind === "product:create:description" || flow.kind === "product:create:emoji" ||
     flow.kind === "product:edit:description" || flow.kind === "product:edit:emoji" ||
     flow.kind === "product:edit:planDetails" || flow.kind === "product:edit:instructions" ||
-    flow.kind === "product:edit:media";
+    flow.kind === "product:edit:media" || flow.kind === "product:edit:image";
 }
 
 function parseWholeNumber(raw: string, label: string, min = 0, max = 1_000_000_000): number {
@@ -384,6 +384,12 @@ export function registerAdminFlow(bot: Bot<BotContext>, deps: BotDependencies): 
           } else {
             throw new ValidationError("Please upload a photo, or send /skip to clear the banner photo.");
           }
+          break;
+        }
+        case "product:edit:image": {
+          await updateProduct(deps.database.prisma, flow.productId, { imageUrl: text === "/skip" ? null : text });
+          ctx.session.adminFlow = null;
+          await showProductAdmin(ctx, deps, flow.productId);
           break;
         }
         case "product:edit:price": {

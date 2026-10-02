@@ -1,4 +1,5 @@
 import { Sparkles } from "lucide-react";
+import { useState } from "react";
 import type { CSSProperties } from "react";
 
 export function brandFor(name: string) {
@@ -26,6 +27,29 @@ export function BrandIcon({ name, small = false }: { name: string; small?: boole
       : brand.kind === "crunchyroll" ? <svg viewBox="0 0 40 40"><path d="M33 19a13 13 0 10-10 15 10 10 0 119-15" fill="currentColor"/></svg>
       : <Sparkles size={30}/>}</span>;
 }
+/**
+ * Product artwork for the Mini App.
+ *
+ * Renders the owner-supplied image link when one is set. If the link is missing,
+ * blocked by the network, or fails to load, this falls back to the generated
+ * brand tile so a card never shows a broken image.
+ */
+export function ProductArt({ name, imageUrl, small = false }: { name: string; imageUrl?: string | null; small?: boolean }) {
+  const [failed, setFailed] = useState(false);
+  if (!imageUrl || failed) return <BrandIcon name={name} small={small}/>;
+  return (
+    <img
+      className={`product-art ${small ? "small" : ""}`}
+      src={imageUrl}
+      alt=""
+      loading="lazy"
+      decoding="async"
+      referrerPolicy="no-referrer"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 export function IrisMark({ className = "" }: { className?: string }) {
   return <span className={`iris-mark ${className}`}><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2c0 9-5 14-14 14 9 0 14 5 14 14 0-9 5-14 14-14C21 16 16 11 16 2z" fill="currentColor"/></svg></span>;
 }

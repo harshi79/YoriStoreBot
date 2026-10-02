@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" width="400" height="300" role="img" aria-label="Spotify gift card artwork">
+  <defs>
+    <linearGradient id="sp" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1db954"/><stop offset="1" stop-color="#0f6b34"/>
+    </linearGradient>
+  </defs>
+  <rect width="400" height="300" fill="url(#sp)"/>
+  <circle cx="200" cy="150" r="118" fill="none" stroke="#ffffff" stroke-opacity=".16" stroke-width="1.5"/>
+  <circle cx="200" cy="150" r="150" fill="none" stroke="#ffffff" stroke-opacity=".09" stroke-width="1.5"/>
+  <g fill="none" stroke="#ffffff" stroke-width="15" stroke-linecap="round" opacity=".95">
+    <path d="M132 118c46-17 100-11 141 12"/>
+    <path d="M140 158c38-13 82-8 116 11"/>
+    <path d="M148 196c30-9 63-5 90 9"/>
+  </g>
+</svg>

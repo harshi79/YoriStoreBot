@@ -66,7 +66,7 @@ import { buildOrderReceiptText } from "../utils/credential-parser.js";
 import { BonusUnavailableError, DomainError } from "../utils/errors.js";
 import { claimDailyBonus, getBonusStatus } from "../services/bonus.service.js";
 
-const START_VIDEO_URL = "https://imglink.cc/cdn/jw1NZXEQQS.mp4";
+const START_VIDEO_URL = "https://imglink.cc/cdn/rCEZkzLQra.mp4";
 const DEFAULT_AVATAR_PATH = fileURLToPath(new URL("../../assets/iris-avatar.png", import.meta.url));
 const PAGE_SIZE = 8;
 

@@ -457,6 +457,38 @@ describe("profiles, catalog, and inventory", () => {
     expect((await updateProduct(prisma, product.id, { imageUrl: "   " })).imageUrl).toBeNull();
   });
 
+  it("collects a web image link in the add-product wizard and refuses an insecure one", async () => {
+    const category = await createCategory(prisma, { name: "Wizard category" });
+    const { bot } = makeTestBot();
+    const send = (text: string) => bot.handleUpdate(privateMessageUpdate(Number(OWNER_ID), text));
+
+    await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), `admin:product:add:${category.id}`));
+    await send("Wizard product");
+    await send("A tidy little upgrade");
+    await send("120");
+    await send("🎁");
+    // An insecure link is refused and must not create the product either.
+    await send("http://insecure.example.com/art.png");
+    expect(await prisma.product.count()).toBe(0);
+    await send("https://cdn.example.com/art/wizard.png");
+
+    const product = await prisma.product.findFirstOrThrow({ where: { name: "Wizard product" } });
+    expect(product).toMatchObject({
+      categoryId: category.id, price: 120, emoji: "🎁",
+      description: "A tidy little upgrade", imageUrl: "https://cdn.example.com/art/wizard.png",
+    });
+
+    // Skipping the final step still creates the product, falling back to the branded tile.
+    await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), `admin:product:add:${category.id}`));
+    await send("Second wizard product");
+    await send("/skip");
+    await send("45");
+    await send("/skip");
+    await send("/skip");
+    const skipped = await prisma.product.findFirstOrThrow({ where: { name: "Second wizard product" } });
+    expect(skipped).toMatchObject({ price: 45, emoji: "✦", description: "", imageUrl: null });
+  });
+
   it("lets the owner set, refuse, and clear a product's web image from the admin panel", async () => {
     const { product } = await makeProduct("Artwork product", 25);
     const { bot, calls } = makeTestBot();

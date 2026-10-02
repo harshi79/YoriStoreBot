@@ -58,8 +58,8 @@ Credit top-ups remain owner-managed/code-based; this release does not take real 
 
 Each product can carry an owner-supplied image link, stored in the same PostgreSQL database as everything else (`products.image_url`, added by migration `20261002020000_product_image_url`).
 
-1. In `/admin`, open the product and tap **🌐 Web image**.
-2. Send an `https://` link to the image (for example `https://cdn.example.com/spotify.png`). Send `/skip` to remove it.
+1. In `/admin`, open the product and tap **🌐 Web image**. The **➕ Add product** wizard asks for the same link as its final step.
+2. Send an `https://` link to the image (for example `https://cdn.example.com/spotify.png`). Send `/skip` to remove it, or to skip it while creating a product.
 3. The Mini App uses that image on the product card, the product detail cover, and the buyer's order list and delivery view.
 
 Notes:
@@ -167,7 +167,6 @@ Only legitimate, authorized digital goods should be loaded into inventory. Inven
 ## Checks and tests
 
 ```sh
-npm run db:generate
 npm test
 npm run lint
 npm run typecheck
@@ -175,7 +174,7 @@ npm run build
 npm audit
 ```
 
-`npm run db:generate` creates the ignored, schema-specific Prisma Client needed by tests and runtime; run it after a fresh install before `npm test`. The tests apply the committed migrations to an in-memory PGlite PostgreSQL-compatible database and exercise atomic purchases, concurrent stock allocation, complete bulk replay (including long request keys and reusable/free goods), production storage failures, health readiness, legacy batch backfills, balance and bonus limits, redeem-code uniqueness, exports, reset confirmations, broadcast accounting, and HTML escaping. The integration tests do not contact Telegram or require production credentials. Mini App tests additionally exercise signature/session validation, forged identities, API authorization, secret-free catalog serialization, scoped wishlists, grouped private deliveries/receipts, code/bonus limits and credit immutability. Frontend TypeScript checks are included in `typecheck` and `build`.
+`npm test` generates the ignored, schema-specific Prisma Client itself first, so a fresh clone can run it directly; `npm run db:generate` is still there if you want to create that client on its own. The tests apply the committed migrations to an in-memory PGlite PostgreSQL-compatible database and exercise atomic purchases, concurrent stock allocation, complete bulk replay (including long request keys and reusable/free goods), production storage failures, health readiness, legacy batch backfills, balance and bonus limits, redeem-code uniqueness, exports, reset confirmations, broadcast accounting, and HTML escaping. The integration tests do not contact Telegram or require production credentials. Mini App tests additionally exercise signature/session validation, forged identities, API authorization, secret-free catalog serialization, scoped wishlists, grouped private deliveries/receipts, code/bonus limits and credit immutability. `tests/product-art.test.tsx` renders the Mini App product artwork server-side to cover the image/branded-tile fallback, since the browser suite in `tests/e2e` needs a Chromium build. Frontend TypeScript checks are included in `typecheck` and `build`.
 
 To also run the service/callback suite against a real PostgreSQL server, supply a **dedicated test database** connection with permission to create schemas:
 

@@ -39,7 +39,7 @@ export function ProductArt({ name, imageUrl, small = false }: { name: string; im
   if (!imageUrl || failed) return <BrandIcon name={name} small={small}/>;
   return (
     <img
-      className={`product-art ${small ? "small" : ""}`}
+      className={small ? "product-art small" : "product-art"}
       src={imageUrl}
       alt=""
       loading="lazy"

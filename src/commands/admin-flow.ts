@@ -189,6 +189,7 @@ function cancelFlowKeyboard(): InlineKeyboard {
 function allowsSkip(flow: AdminFlow): boolean {
   return flow.kind === "category:edit:description" ||
     flow.kind === "product:create:description" || flow.kind === "product:create:emoji" ||
+    flow.kind === "product:create:image" ||
     flow.kind === "product:edit:description" || flow.kind === "product:edit:emoji" ||
     flow.kind === "product:edit:planDetails" || flow.kind === "product:edit:instructions" ||
     flow.kind === "product:edit:media" || flow.kind === "product:edit:image";
@@ -335,12 +336,19 @@ export function registerAdminFlow(bot: Bot<BotContext>, deps: BotDependencies): 
           break;
         }
         case "product:create:emoji": {
+          const emoji = text === "/skip" ? "✦" : text;
+          ctx.session.adminFlow = { kind: "product:create:image", categoryId: flow.categoryId, name: flow.name, description: flow.description, price: flow.price, emoji };
+          await showFlowPanel(ctx, deps, `🌐 ${smallCaps("Send the web image link for")} <b>${escapeHtml(flow.name)}</b> ${smallCaps("(an")} <code>https://</code> ${smallCaps("address shown on the Mini App product card), or send")} <code>/skip</code> ${smallCaps("to use the branded tile.")}`);
+          break;
+        }
+        case "product:create:image": {
           const product = await createProduct(deps.database.prisma, {
             categoryId: flow.categoryId,
             name: flow.name,
             description: flow.description,
             price: flow.price,
-            emoji: text === "/skip" ? "✦" : text,
+            emoji: flow.emoji,
+            imageUrl: text === "/skip" ? null : text,
           });
           ctx.session.adminFlow = null;
           await showProductAdmin(ctx, deps, product.id);

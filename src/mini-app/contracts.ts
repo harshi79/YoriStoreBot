@@ -14,6 +14,7 @@ export interface ProductDto {
   deliveryInstructions: string;
   price: number;
   emoji: string;
+  imageUrl: string | null;
   featured: boolean;
   isUnlimited: boolean;
   warrantyHours: number;
@@ -44,6 +45,7 @@ export interface OrderDto {
   productId: string;
   productName: string;
   productEmoji: string;
+  productImageUrl: string | null;
   category: string;
   paid: number;
   quantity: number;

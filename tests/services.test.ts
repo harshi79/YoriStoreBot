@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
@@ -52,11 +52,12 @@ import { AlreadyRedeemedError, BonusUnavailableError, CodeUnavailableError, Insu
 import { loadConfig } from "../src/config/env.js";
 import { createDatabase } from "../src/db/client.js";
 import { purchaseDeliveryMessage, welcomeMessage } from "../src/messages/iris.js";
+import { smallCaps } from "../src/utils/format.js";
 
 const OWNER_ID = 7_728_424_218n;
-const migrationPath = new URL("../prisma/migrations/20260930000000_init/migration.sql", import.meta.url);
-const wishlistMigrationPath = new URL("../prisma/migrations/20261002010000_mini_app_wishlist/migration.sql", import.meta.url);
-const batchMigrationPath = new URL("../prisma/migrations/20261002000000_purchase_batches/migration.sql", import.meta.url);
+// Every committed migration, in chronological order, so a new column added to
+// prisma/schema.prisma is exercised here without editing this file again.
+const migrationsRoot = new URL("../prisma/migrations/", import.meta.url);
 
 let pg: PGlite | undefined;
 let postgresPool: Pool | undefined;
@@ -296,9 +297,8 @@ function privateCallbackUpdate(telegramId: number, data: string): Update {
 }
 
 beforeAll(async () => {
-  const initialSql = await readFile(migrationPath, "utf8");
-  const batchSql = await readFile(batchMigrationPath, "utf8");
-  const wishlistSql = await readFile(wishlistMigrationPath, "utf8");
+  const migrations = (await readdir(migrationsRoot)).filter((name) => /^\d/.test(name)).sort();
+  const migrationSql = await Promise.all(migrations.map(async (name) => readFile(new URL(`${name}/migration.sql`, migrationsRoot), "utf8")));
   if (process.env.TEST_POSTGRES_URL) {
     // Never use the application's DATABASE_URL. Keep real PostgreSQL tests in a
     // unique schema so cleanup cannot delete pre-existing tables or store data.
@@ -316,17 +316,13 @@ beforeAll(async () => {
     });
     const client = await postgresPool.connect();
     try {
-      await client.query(initialSql);
-      await client.query(batchSql);
-      await client.query(wishlistSql);
+      for (const sql of migrationSql) await client.query(sql);
     } finally {
       client.release();
     }
   } else {
     pg = new PGlite();
-    await pg.exec(initialSql);
-    await pg.exec(batchSql);
-    await pg.exec(wishlistSql);
+    for (const sql of migrationSql) await pg.exec(sql);
   }
   prisma = createTestClient();
   await prisma.$connect();
@@ -425,6 +421,96 @@ describe("profiles, catalog, and inventory", () => {
     expect(archived).toMatchObject({ enabled: false, deletedAt: expect.any(Date) });
     await expect(archiveProduct(prisma, product.id)).rejects.toBeDefined();
     expect(await listEnabledCategories(prisma)).toHaveLength(1);
+  });
+
+  it("stores only https web image links, clears them on request, and copies them when cloning", async () => {
+    const category = await createCategory(prisma, { name: "Artwork category" });
+    const product = await createProduct(prisma, {
+      categoryId: category.id,
+      name: "Artwork item",
+      price: 30,
+      imageUrl: "  https://cdn.example.com/art/pack.png  ",
+    });
+    expect(product.imageUrl).toBe("https://cdn.example.com/art/pack.png");
+
+    const edited = await updateProduct(prisma, product.id, { imageUrl: "https://cdn.example.com/art/other.webp" });
+    expect(edited.imageUrl).toBe("https://cdn.example.com/art/other.webp");
+    // Local development may point at the developer's own machine, where there is no TLS to enforce.
+    expect((await updateProduct(prisma, product.id, { imageUrl: "http://localhost:5173/art.png" })).imageUrl).toBe("http://localhost:5173/art.png");
+
+    for (const rejected of [
+      "not a link",
+      "http://cdn.example.com/art.png",
+      "javascript:alert(1)",
+      "//cdn.example.com/a.png",
+      "ftp://cdn.example.com/a.png",
+      `https://cdn.example.com/${"a".repeat(1_100)}.png`,
+    ]) {
+      await expect(updateProduct(prisma, product.id, { imageUrl: rejected })).rejects.toBeDefined();
+    }
+    expect((await prisma.product.findUniqueOrThrow({ where: { id: product.id } })).imageUrl).toBe("http://localhost:5173/art.png");
+
+    const clone = await cloneProduct(prisma, product.id);
+    expect(clone.imageUrl).toBe("http://localhost:5173/art.png");
+
+    expect((await updateProduct(prisma, product.id, { imageUrl: null })).imageUrl).toBeNull();
+    expect((await updateProduct(prisma, product.id, { imageUrl: "   " })).imageUrl).toBeNull();
+  });
+
+  it("collects a web image link in the add-product wizard and refuses an insecure one", async () => {
+    const category = await createCategory(prisma, { name: "Wizard category" });
+    const { bot } = makeTestBot();
+    const send = (text: string) => bot.handleUpdate(privateMessageUpdate(Number(OWNER_ID), text));
+
+    await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), `admin:product:add:${category.id}`));
+    await send("Wizard product");
+    await send("A tidy little upgrade");
+    await send("120");
+    await send("🎁");
+    // An insecure link is refused and must not create the product either.
+    await send("http://insecure.example.com/art.png");
+    expect(await prisma.product.count()).toBe(0);
+    await send("https://cdn.example.com/art/wizard.png");
+
+    const product = await prisma.product.findFirstOrThrow({ where: { name: "Wizard product" } });
+    expect(product).toMatchObject({
+      categoryId: category.id, price: 120, emoji: "🎁",
+      description: "A tidy little upgrade", imageUrl: "https://cdn.example.com/art/wizard.png",
+    });
+
+    // Skipping the final step still creates the product, falling back to the branded tile.
+    await bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), `admin:product:add:${category.id}`));
+    await send("Second wizard product");
+    await send("/skip");
+    await send("45");
+    await send("/skip");
+    await send("/skip");
+    const skipped = await prisma.product.findFirstOrThrow({ where: { name: "Second wizard product" } });
+    expect(skipped).toMatchObject({ price: 45, emoji: "✦", description: "", imageUrl: null });
+  });
+
+  it("lets the owner set, refuse, and clear a product's web image from the admin panel", async () => {
+    const { product } = await makeProduct("Artwork product", 25);
+    const { bot, calls } = makeTestBot();
+    const stored = async () => (await prisma.product.findUniqueOrThrow({ where: { id: product.id } })).imageUrl;
+    const openEditor = () => bot.handleUpdate(privateCallbackUpdate(Number(OWNER_ID), `admin:product:edit:image:${product.id}`));
+
+    await openEditor();
+    await bot.handleUpdate(privateMessageUpdate(Number(OWNER_ID), "https://cdn.example.com/art/pack.png"));
+    expect(await stored()).toBe("https://cdn.example.com/art/pack.png");
+    const panel = JSON.stringify([...calls].reverse().find((call) => call.method === "sendRichMessage")?.payload);
+    expect(panel).toContain(`admin:product:edit:image:${product.id}`);
+    expect(panel).toContain(smallCaps("Set 🌐"));
+    expect(panel).not.toContain(smallCaps("None (branded tile)"));
+
+    // An insecure link is refused and the value already stored is left untouched.
+    await openEditor();
+    await bot.handleUpdate(privateMessageUpdate(Number(OWNER_ID), "http://insecure.example.com/art.png"));
+    expect(await stored()).toBe("https://cdn.example.com/art/pack.png");
+
+    await openEditor();
+    await bot.handleUpdate(privateMessageUpdate(Number(OWNER_ID), "/skip"));
+    expect(await stored()).toBeNull();
   });
 
   it("keeps inventory tied to one product and updates available stock accurately", async () => {

@@ -9,7 +9,7 @@ import { loadConfig } from "../src/config/env.js";
 import type { AppLogger } from "../src/utils/logger.js";
 import { createMiniAppServer, listenMiniApp } from "../src/mini-app/server.js";
 import { createMiniSession } from "../src/mini-app/auth.js";
-import { createCategory, createProduct, addInventoryItems } from "../src/services/store.service.js";
+import { createCategory, createProduct, addInventoryItems, updateProduct } from "../src/services/store.service.js";
 import { changeCredits } from "../src/services/credits.service.js";
 import { buildStoreExport } from "../src/services/export.service.js";
 import type { OrderDetailDto, ProfileDto, PurchaseDto, OrdersDto, CatalogDto } from "../src/mini-app/contracts.js";
@@ -68,10 +68,26 @@ beforeEach(async () => {
 describe("Mini App HTTP security and database workflows", () => {
   it("exposes a secret-free public catalog and no bot token or database URL", async () => {
     const catalog = await request<CatalogDto>("/api/catalog"); expect(catalog.status).toBe(200);
-    expect(catalog.body.products[0]).toMatchObject({ id: productId, price: 40, stock: 4 });
+    expect(catalog.body.products[0]).toMatchObject({ id: productId, price: 40, stock: 4, imageUrl: null });
     expect(JSON.stringify(catalog.body)).not.toMatch(/PRIVATE-DELIVERY|payloadHash|payload_hash|botToken|databaseUrl/);
     const publicConfig = await request("/api/config"); expect(JSON.stringify(publicConfig.body)).not.toContain(config.botToken);
     expect(publicConfig.body.demoMode).toBe(false);
+  });
+  it("publishes the owner-set product image link on the catalog and on the buyer's own order", async () => {
+    const image = "https://cdn.example.com/art/pack.png";
+    await updateProduct(db, productId, { imageUrl: image });
+    const catalog = await request<CatalogDto>("/api/catalog");
+    expect(catalog.body.products[0]!.imageUrl).toBe(image);
+    // A Telegram file_id stays server-side: it is never published to the browser as an image link.
+    await updateProduct(db, productId, { mediaFileId: "AgACAgUAAxkBAAIB-secret-file-id" });
+    expect(JSON.stringify((await request<CatalogDto>("/api/catalog")).body)).not.toContain("secret-file-id");
+    const purchase = await request<PurchaseDto>("/api/purchases", { token: userToken(), method: "POST", body: { productId, quantity: 2, expectedPrice: 40, idempotencyKey: randomUUID() } });
+    expect(purchase.status).toBe(200);
+    const list = await request<OrdersDto>("/api/orders", { token: userToken() });
+    expect(list.body.orders[0]!.productImageUrl).toBe(image);
+    const detail = await request<OrderDetailDto>(`/api/orders/${purchase.body.purchaseId}`, { token: userToken() });
+    expect(detail.body.productImageUrl).toBe(image);
+    expect(JSON.stringify((await request<OrdersDto>("/api/orders", { token: userToken() })).body)).not.toContain("secret-file-id");
   });
   it("requires a verified session for every private account endpoint", async () => {
     for (const path of ["/api/profile", "/api/wallet", "/api/orders", "/api/wishlist", "/api/referrals"]) {

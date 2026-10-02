@@ -260,6 +260,32 @@ export async function getProduct(prisma: PrismaClient, productId: string) {
   return product;
 }
 
+/**
+ * Validates an owner-supplied web image link.
+ *
+ * The Mini App loads this URL directly from the customer's browser, so only
+ * `https:` is accepted; plain `http:` is allowed for localhost during local
+ * development only, where there is no mixed-content risk to protect against.
+ * An empty string clears the image.
+ */
+export function parseProductImageUrl(raw: string | null): string | null {
+  if (raw === null) return null;
+  const value = raw.trim();
+  if (!value) return null;
+  if (value.length > 1_024) throw new ValidationError("Image URLs are limited to 1,024 characters.");
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new ValidationError("That is not a valid link. Send the full image address, starting with https://");
+  }
+  const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) {
+    throw new ValidationError("Image links must start with https:// so customers can load them safely.");
+  }
+  return value;
+}
+
 export async function createProduct(
   prisma: PrismaClient,
   input: {
@@ -270,6 +296,7 @@ export async function createProduct(
     deliveryInstructions?: string;
     warrantyHours?: number;
     mediaFileId?: string | null;
+    imageUrl?: string | null;
     featured?: boolean;
     isUnlimited?: boolean;
     price: number;
@@ -299,6 +326,7 @@ export async function createProduct(
       deliveryInstructions: input.deliveryInstructions?.trim() ?? "",
       warrantyHours,
       mediaFileId: input.mediaFileId ?? null,
+      imageUrl: input.imageUrl === undefined ? null : parseProductImageUrl(input.imageUrl),
       featured: input.featured ?? false,
       isUnlimited: input.isUnlimited ?? false,
       price: input.price,
@@ -317,6 +345,7 @@ export async function updateProduct(
     deliveryInstructions?: string;
     warrantyHours?: number;
     mediaFileId?: string | null;
+    imageUrl?: string | null;
     featured?: boolean;
     isUnlimited?: boolean;
     price?: number;
@@ -332,6 +361,7 @@ export async function updateProduct(
     deliveryInstructions?: string;
     warrantyHours?: number;
     mediaFileId?: string | null;
+    imageUrl?: string | null;
     featured?: boolean;
     isUnlimited?: boolean;
     price?: number;
@@ -354,6 +384,7 @@ export async function updateProduct(
     update.warrantyHours = data.warrantyHours;
   }
   if (data.mediaFileId !== undefined) update.mediaFileId = data.mediaFileId;
+  if (data.imageUrl !== undefined) update.imageUrl = parseProductImageUrl(data.imageUrl);
   if (data.featured !== undefined) update.featured = data.featured;
   if (data.isUnlimited !== undefined) update.isUnlimited = data.isUnlimited;
   if (data.price !== undefined) {
@@ -403,6 +434,7 @@ export async function cloneProduct(prisma: PrismaClient, productId: string) {
       deliveryInstructions: source.deliveryInstructions,
       warrantyHours: source.warrantyHours,
       mediaFileId: source.mediaFileId,
+      imageUrl: source.imageUrl,
       featured: false,
       isUnlimited: source.isUnlimited,
       price: source.price,

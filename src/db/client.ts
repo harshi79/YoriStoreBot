@@ -179,6 +179,7 @@ export async function ensureDatabaseSchema(
     `ALTER TABLE "products" ADD COLUMN IF NOT EXISTS "delivery_instructions" VARCHAR(2000) NOT NULL DEFAULT ''`,
     `ALTER TABLE "products" ADD COLUMN IF NOT EXISTS "warranty_hours" INTEGER NOT NULL DEFAULT 24`,
     `ALTER TABLE "products" ADD COLUMN IF NOT EXISTS "media_file_id" VARCHAR(512)`,
+    `ALTER TABLE "products" ADD COLUMN IF NOT EXISTS "image_url" VARCHAR(1024)`,
     `ALTER TABLE "products" ADD COLUMN IF NOT EXISTS "featured" BOOLEAN NOT NULL DEFAULT false`,
     `ALTER TABLE "products" ADD COLUMN IF NOT EXISTS "is_unlimited" BOOLEAN NOT NULL DEFAULT false`,
     `DO $$ BEGIN CREATE TYPE "WarrantyClaimStatus" AS ENUM ('PENDING', 'REPLACED', 'REFUNDED', 'REJECTED'); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,

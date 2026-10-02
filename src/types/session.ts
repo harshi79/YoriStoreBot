@@ -7,12 +7,14 @@ export type AdminFlow =
   | { kind: "product:create:description"; categoryId: string; name: string }
   | { kind: "product:create:price"; categoryId: string; name: string; description: string }
   | { kind: "product:create:emoji"; categoryId: string; name: string; description: string; price: number }
+  | { kind: "product:create:image"; categoryId: string; name: string; description: string; price: number; emoji: string }
   | { kind: "product:edit:name"; productId: string }
   | { kind: "product:edit:description"; productId: string }
   | { kind: "product:edit:planDetails"; productId: string }
   | { kind: "product:edit:instructions"; productId: string }
   | { kind: "product:edit:warranty"; productId: string }
   | { kind: "product:edit:media"; productId: string }
+  | { kind: "product:edit:image"; productId: string }
   | { kind: "product:edit:price"; productId: string }
   | { kind: "product:edit:emoji"; productId: string }
   | { kind: "inventory:add:payload"; productId: string }

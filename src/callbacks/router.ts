@@ -454,6 +454,7 @@ async function handleAdminCallback(
       : kind === "instructions" ? { kind: "product:edit:instructions" as const, productId }
       : kind === "warranty" ? { kind: "product:edit:warranty" as const, productId }
       : kind === "media" ? { kind: "product:edit:media" as const, productId }
+      : kind === "image" ? { kind: "product:edit:image" as const, productId }
       : kind === "price" ? { kind: "product:edit:price" as const, productId }
       : kind === "emoji" ? { kind: "product:edit:emoji" as const, productId }
       : null;
@@ -465,6 +466,7 @@ async function handleAdminCallback(
       instructions: `📜 ${smallCaps("Send the login guide and rules delivered to buyers upon purchase (for example:")} <code>• Do NOT change password\n• Use 1 screen</code>${smallCaps("). Or /skip to clear it.")}`,
       warranty: `🛡 ${smallCaps("Send the replacement warranty window in whole hours (0–8,760). For example:")} <code>24</code> ${smallCaps("for 24 hours,")} <code>720</code> ${smallCaps("for 30 days, or")} <code>0</code> ${smallCaps("for no warranty.")}`,
       media: `🖼 ${smallCaps("Upload a photo to set as the product banner, or send /skip to remove the current banner.")}`,
+      image: `🌐 ${smallCaps("Send the web image link (an")} <code>https://</code> ${smallCaps("address ending in .jpg, .png or .webp) shown on the Mini App product card. Or /skip to remove it.")}`,
       price: `💳 ${smallCaps("Send the new whole-credit price (0–1,000,000,000).")}`,
       emoji: `🎨 ${smallCaps("Send the new product icon, or /skip to use ✦.")}`,
     };

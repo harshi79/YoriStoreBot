@@ -38,7 +38,7 @@ Set `MINI_APP_TEST_URL` if the preview uses a port other than 3001. The browser 
 ### Connect the live Telegram Mini App
 
 1. Configure a real `BOT_TOKEN`, the same PostgreSQL `DATABASE_URL` as your bot, `NODE_ENV=production`, `PORT`, and `MINI_APP_URL=https://YOUR_PUBLIC_DOMAIN` on the host. Never place secrets in a `VITE_*` variable.
-2. Back up/stop the old bot, then build and start. `npm start` applies **all** committed migrations (including `20261002000000_purchase_batches` and `20261002010000_mini_app_wishlist`) before booting:
+2. Back up/stop the old bot, then build and start. `npm start` applies **all** committed migrations (including `20261002000000_purchase_batches`, `20261002010000_mini_app_wishlist` and `20261002020000_product_image_url`) before booting:
 
    ```sh
    npm run build
@@ -52,7 +52,23 @@ Set `MINI_APP_TEST_URL` if the preview uses a port other than 3001. The browser 
 
 If you host the web API separately, run `npm run mini:serve` after `npm run build` with the same token/database URL. That process verifies the bot with `getMe` but does **not** start a second long-polling instance. Use PostgreSQL to share data across processes; embedded PGlite is a single-process development store.
 
-Credit top-ups remain owner-managed/code-based; this release does not take real payments or add a payment gateway. Catalog product photos currently use the app’s branded artwork; product data, prices and availability are always read from the database. Owner management remains in the authorized Telegram `/admin` panel.
+Credit top-ups remain owner-managed/code-based; this release does not take real payments or add a payment gateway. Product data, prices and availability are always read from the database. Owner management remains in the authorized Telegram `/admin` panel.
+
+### Per-product images
+
+Each product can carry an owner-supplied image link, stored in the same PostgreSQL database as everything else (`products.image_url`, added by migration `20261002020000_product_image_url`).
+
+1. In `/admin`, open the product and tap **🌐 Web image**. The **➕ Add product** wizard asks for the same link as its final step.
+2. Send an `https://` link to the image (for example `https://cdn.example.com/spotify.png`). Send `/skip` to remove it, or to skip it while creating a product.
+3. The Mini App uses that image on the product card, the product detail cover, and the buyer's order list and delivery view.
+
+Notes:
+
+- Only `https:` links are accepted (`http:` is allowed for `localhost`/`127.0.0.1` during local development), so a mixed-content page can never be produced. Links are capped at 1,024 characters and validated with `URL`, which also rejects `javascript:` and protocol-relative `//host/…` values.
+- The image is fetched by the customer's browser, not proxied by the bot, so nothing is stored on your server and no bandwidth is used. Host images on any CDN or object storage you like.
+- If a product has no image, or its link fails to load, the Mini App falls back to the generated branded tile. A card never renders a broken image.
+- This is separate from **🖼 Banner**, the Telegram-only photo used inside the bot chat. A Telegram `file_id` is never sent to the browser: resolving it would put the bot token in the URL, which this project never does.
+- Because the owner chooses an arbitrary host, the `img-src` CSP directive allows `https:`. Every other directive (`script-src`, `connect-src`, `object-src`, `base-uri`, `form-action`) stays locked to the app origin.
 
 ## Quick start
 
@@ -151,7 +167,6 @@ Only legitimate, authorized digital goods should be loaded into inventory. Inven
 ## Checks and tests
 
 ```sh
-npm run db:generate
 npm test
 npm run lint
 npm run typecheck
@@ -159,7 +174,7 @@ npm run build
 npm audit
 ```
 
-`npm run db:generate` creates the ignored, schema-specific Prisma Client needed by tests and runtime; run it after a fresh install before `npm test`. The tests apply the committed migrations to an in-memory PGlite PostgreSQL-compatible database and exercise atomic purchases, concurrent stock allocation, complete bulk replay (including long request keys and reusable/free goods), production storage failures, health readiness, legacy batch backfills, balance and bonus limits, redeem-code uniqueness, exports, reset confirmations, broadcast accounting, and HTML escaping. The integration tests do not contact Telegram or require production credentials. Mini App tests additionally exercise signature/session validation, forged identities, API authorization, secret-free catalog serialization, scoped wishlists, grouped private deliveries/receipts, code/bonus limits and credit immutability. Frontend TypeScript checks are included in `typecheck` and `build`.
+`npm test` generates the ignored, schema-specific Prisma Client itself first, so a fresh clone can run it directly; `npm run db:generate` is still there if you want to create that client on its own. The tests apply the committed migrations to an in-memory PGlite PostgreSQL-compatible database and exercise atomic purchases, concurrent stock allocation, complete bulk replay (including long request keys and reusable/free goods), production storage failures, health readiness, legacy batch backfills, balance and bonus limits, redeem-code uniqueness, exports, reset confirmations, broadcast accounting, and HTML escaping. The integration tests do not contact Telegram or require production credentials. Mini App tests additionally exercise signature/session validation, forged identities, API authorization, secret-free catalog serialization, scoped wishlists, grouped private deliveries/receipts, code/bonus limits and credit immutability. `tests/product-art.test.tsx` renders the Mini App product artwork server-side to cover the image/branded-tile fallback, since the browser suite in `tests/e2e` needs a Chromium build. Frontend TypeScript checks are included in `typecheck` and `build`.
 
 To also run the service/callback suite against a real PostgreSQL server, supply a **dedicated test database** connection with permission to create schemas:
 
@@ -175,4 +190,4 @@ That suite creates and drops a unique `iris_test_*` schema; it does not use the 
 
 - The bot uses grammY's default in-memory sessions. An interrupted owner form is lost on restart; balances, settings, purchases, inventory, and all other persistent data remain in PostgreSQL.
 - Callback throttling and broadcast execution are process-local. Run one bot process per bot token unless a shared session/rate-limit strategy is added.
-- The initial migration is under `prisma/migrations/20260930000000_init/`; purchase grouping is added by `prisma/migrations/20261002000000_purchase_batches/`. Use `npm run db:deploy` before starting production builds; do not edit an already-applied migration in place.
+- The initial migration is under `prisma/migrations/20260930000000_init/`; purchase grouping is added by `prisma/migrations/20261002000000_purchase_batches/`, the Mini App wishlist by `prisma/migrations/20261002010000_mini_app_wishlist/`, and per-product images by `prisma/migrations/20261002020000_product_image_url/`. Use `npm run db:deploy` before starting production builds; do not edit an already-applied migration in place.

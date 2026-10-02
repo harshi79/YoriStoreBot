@@ -30,7 +30,7 @@ export interface MiniAppDependencies {
 
 const productSelect = {
   id: true, name: true, description: true, planDetails: true, deliveryInstructions: true,
-  price: true, emoji: true, featured: true, isUnlimited: true, warrantyHours: true,
+  price: true, emoji: true, imageUrl: true, featured: true, isUnlimited: true, warrantyHours: true,
   category: { select: { id: true, name: true, emoji: true } },
   _count: { select: { inventory: { where: { status: "AVAILABLE" as const } } } },
 } satisfies Prisma.ProductSelect;
@@ -40,7 +40,7 @@ const idSchema = z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/);
 
 function productDto(product: CatalogProduct): ProductDto {
   const { _count, ...safe } = product;
-  return { ...safe, stock: _count.inventory };
+  return { ...safe, imageUrl: product.imageUrl ?? null, stock: _count.inventory };
 }
 
 function json(res: ServerResponse, status: number, data: unknown) {
@@ -128,6 +128,7 @@ export async function getMiniOrderDetail(db: PrismaClient, userId: string, purch
   }));
   return {
     id: root.id, productId: selected.productId, productName: selected.product.name, productEmoji: selected.product.emoji,
+    productImageUrl: selected.product.imageUrl ?? null,
     category: selected.product.category.name, paid: items.reduce((sum, item) => sum + item.amountPaid, 0),
     quantity: items.length, createdAt: root.createdAt.toISOString(), warrantyHours: selected.product.warrantyHours,
     warrantyExpiresAt: new Date(root.createdAt.getTime() + selected.product.warrantyHours * 3_600_000).toISOString(),
@@ -280,7 +281,7 @@ export function createMiniAppServer(deps: MiniAppDependencies, staticDirectory =
         const items = await db.purchase.findMany({ where: { buyerId: user.id, batchId: { in: roots.map((root) => root.batchId) } }, select: { batchId: true, amountPaid: true, warrantyClaim: { select: { status: true } } } });
         const orders: OrderDto[] = roots.map((root) => {
           const batch = items.filter((item) => item.batchId === root.batchId);
-          return { id: root.id, productId: root.productId, productName: root.product.name, productEmoji: root.product.emoji, category: root.product.category.name, paid: batch.reduce((sum, item) => sum + item.amountPaid, 0), quantity: batch.length, createdAt: root.createdAt.toISOString(), warrantyHours: root.product.warrantyHours, claimStatus: batch.find((item) => item.warrantyClaim)?.warrantyClaim?.status ?? null };
+          return { id: root.id, productId: root.productId, productName: root.product.name, productEmoji: root.product.emoji, productImageUrl: root.product.imageUrl ?? null, category: root.product.category.name, paid: batch.reduce((sum, item) => sum + item.amountPaid, 0), quantity: batch.length, createdAt: root.createdAt.toISOString(), warrantyHours: root.product.warrantyHours, claimStatus: batch.find((item) => item.warrantyClaim)?.warrantyClaim?.status ?? null };
         });
         json(res, 200, { orders, total, page, pages: Math.max(1, Math.ceil(total / 12)) }); return;
       }
@@ -306,7 +307,11 @@ export function createMiniAppServer(deps: MiniAppDependencies, staticDirectory =
       throw new ApiError(404, "NOT_FOUND", "That endpoint does not exist.");
     }
     if (method !== "GET" && method !== "HEAD") throw new ApiError(404, "NOT_FOUND", "That page does not exist.");
-    res.setHeader("content-security-policy", "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https://t.me https://*.telegram.org https://*.telegram-cdn.org; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'");
+    // `img-src https:` is deliberately broader than every other directive: the owner stores a
+    // product image link on an arbitrary host (S3, Cloudinary, a CDN) and the customer's browser
+    // fetches it directly. Images cannot execute script, and product data itself still only ever
+    // comes from `'self'`, so script/connect/object/base/form stay locked to the app origin.
+    res.setHeader("content-security-policy", "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'");
     const decoded = decodeURIComponent(path);
     if (decoded.split("/").some((part) => part.startsWith(".")) || decoded.includes("\0")) throw new ApiError(404, "NOT_FOUND", "That asset does not exist.");
     let file = resolve(staticDirectory, `.${decoded}`);
